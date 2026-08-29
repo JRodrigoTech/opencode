@@ -1,324 +1,151 @@
 # Migración al stack nativo y retirada de AI SDK
 
-## Tesis
+## Tesis corregida
 
-**[INFERENCIA]** La evolución de providers de OpenCode se entiende mejor como una migración por etapas desde AI SDK hacia un kernel LLM propio, no como una reescritura instantánea.
+La evolución de providers de OpenCode es una migración por etapas desde AI SDK hacia un kernel LLM propio. En `dev` esa migración está **avanzada pero no completada**.
 
-La evidencia combina:
+La distinción esencial es:
 
-- `llm-centralization`;
-- familia `llm-native-*`;
-- familia `native-provider-*`;
-- `ai-native-routing`;
-- `native-provider-stack`;
-- `remove-ai-sdk`;
-- `bedrock-credential-chain`;
-- `dev` actual.
+- `packages/llm` y el runner Core V2 ya implementan/consumen el stack nativo;
+- `packages/opencode/src/session/llm.ts`, usado por el pipeline `SessionPrompt`, mantiene **AI SDK como runtime por defecto**;
+- `LLMNativeRuntime` en ese pipeline se activa mediante `experimentalNativeLlm` y puede volver a AI SDK cuando el modelo no está soportado.
+
+Por tanto, una branch llamada `remove-ai-sdk` representa arquitectura objetivo/evidencia histórica, no una prueba de que `dev` haya eliminado AI SDK de todos sus paths.
 
 ## Etapa 0 — Provider runtime acoplado a sesión/AI SDK
 
-**[HISTÓRICO]** En generaciones tempranas, la capa que prepara el modelo está más próxima al runtime de sesión y al loader de packages AI SDK.
-
-`llm-centralization` introduce una primera concentración de lógica LLM, pero todavía no muestra el boundary independiente que existe hoy.
-
-**[INFERENCIA]** El problema reconocido en esta etapa era dispersión: model options, provider transforms y streaming estaban demasiado cerca del agent/session loop.
+En generaciones tempranas, model options, provider transforms, streaming y el loader estaban estrechamente ligados al runtime de sesión. `llm-centralization` empieza a concentrar esa lógica.
 
 ## Etapa 1 — Request/event seams
 
-Branches como:
-
-- `llm-native-request-adapter`;
-- `llm-native-event-adapter`;
-- `llm-native-inject-client`;
-- `llm-service-event-seam`;
-- `llm-native-runtime-openai`.
-
-**[INFERENCIA]** Descomponen la dependencia en dos direcciones:
+Las familias `llm-native-request-*`, `llm-native-event-*`, `llm-service-event-seam` y equivalentes separan dos direcciones:
 
 ```text
-OpenCode request -> native provider request
-provider stream -> OpenCode events
+OpenCode request -> provider/native request
+provider/native stream -> OpenCode LLMEvent
 ```
 
-Esta es la forma fundamental del package `packages/llm` presente en `dev`.
+Esa frontera sobrevive en `dev`.
 
-## Etapa 2 — Protocol stack independiente
+## Etapa 2 — `packages/llm`
 
-**[HECHO]** `dev` contiene un package LLM con:
+`dev` contiene un package independiente con:
 
 - schema portable;
 - provider facades;
 - routes;
-- auth;
-- endpoints;
-- transports;
+- auth application;
+- endpoint/transport;
 - protocol adapters;
 - retry/error normalization;
 - cache policy;
 - usage normalization.
 
-**[HECHO]** El package puede representar más providers/protocols que los que el core resolver activa desde el catálogo.
-
-**[INFERENCIA]** Esto es un strangler seam: el nuevo subsistema puede alcanzar paridad antes de sustituir el loader antiguo.
+El package soporta más providers/protocols que los que todos los consumidores de `dev` activan actualmente.
 
 ## Etapa 3 — Native provider packages
 
-La familia:
+La familia `native-provider-*` trabaja la resolución de catálogo/config/provider packages. La lectura arquitectónica es convertir provider/protocol/transport en unidades reemplazables, dejando el catálogo y credenciales como capas separadas.
 
-- `native-provider-schema`;
-- `native-provider-config`;
-- `native-provider-core`;
-- `native-provider-packages`;
-- `native-provider-stack`;
-- `native-provider-clean`.
+## Etapa 4 — Branch `remove-ai-sdk`
 
-**[HECHO]** `native-provider-stack` toca de manera coordinada provider/model schemas, catalog/config, session model resolution y provider entrypoints.
+Esta línea contiene la evidencia más explícita de una arquitectura donde el stack nativo cubre una superficie amplia de providers y protocolos.
 
-**[INFERENCIA]** El objetivo es convertir el provider en una unidad cargable con un contrato pequeño de `model(id, settings)`, dejando que core resuelva qué package/facade usar.
+Su `STATUS.md` documentaba todavía gaps de paridad, entre ellos cobertura del runner, Bedrock credentials, Vertex/Azure y structured output. Debe leerse como evidencia de migración, no como baseline automática de `dev`.
 
-## Etapa 4 — `remove-ai-sdk`
+## Estado real de `dev`
 
-Esta branch es la evidencia más explícita de arquitectura objetivo.
+### A. Pipeline de producto (`packages/opencode`)
 
-### Package `packages/ai`
-
-**[HECHO]** Contiene una expansión/renombrado de la línea `packages/llm` con:
-
-- `llm.ts`;
-- `provider.ts`;
-- `provider-package.ts`;
-- `provider-error.ts`;
-- tool runtime;
-- image clients/protocols;
-- route transports HTTP/WebSocket;
-- múltiples provider facades.
-
-### Protocolos
-
-**[HECHO]** Incluye al menos:
-
-- OpenAI Chat;
-- Open Responses;
-- OpenAI Responses;
-- OpenAI-compatible Chat;
-- OpenAI-compatible Responses;
-- Anthropic Messages;
-- Gemini;
-- Bedrock Converse;
-- image protocols.
-
-### Providers/deployments
-
-**[HECHO]** La branch incluye facades para:
-
-- OpenAI;
-- Anthropic;
-- Anthropic-compatible;
-- Google;
-- Vertex Gemini/Chat/Responses/Messages;
-- Azure;
-- Amazon Bedrock;
-- Bedrock Mantle;
-- OpenRouter;
-- xAI;
-- Cloudflare;
-- Cerebras;
-- DeepInfra;
-- Groq;
-- TogetherAI;
-- ZAI y otros compatibles.
-
-## `STATUS.md`: evidencia contra una interpretación demasiado optimista
-
-`packages/ai/STATUS.md` fue revisado el 2026-08-07.
-
-**[HECHO]** El documento dice explícitamente que el package nativo y el runner no tenían la misma cobertura.
-
-### Nativo usable pero no activado plenamente
-
-- Google Gemini;
-- Vertex Gemini;
-- Vertex Chat;
-- Vertex Responses;
-- Vertex Messages;
-- Azure;
-- Bedrock.
-
-### Runner nativo limitado
-
-**[HECHO]** El runner de esa generación todavía mapea directamente sólo:
-
-- `@ai-sdk/openai`;
-- `@ai-sdk/anthropic`;
-- `@ai-sdk/openai-compatible` con URL explícita.
-
-El resto puede caer al loader AI SDK.
-
-### Gaps documentados
-
-**[HECHO]** El propio status enumera entre los riesgos:
-
-- runner coverage menor que provider package coverage;
-- falta de API-aware selection Chat vs Responses para compatibles;
-- Bedrock sin paridad de AWS default credential chain;
-- Vertex sin mapping/recorded coverage suficiente;
-- Azure sin token/AAD parity;
-- provider options tipadas incompletas;
-- structured output todavía basado principalmente en synthetic tool;
-- cassettes desiguales.
-
-**[INFERENCIA]** La retirada de AI SDK fue deliberadamente retenida hasta obtener paridad en los aspectos operacionales difíciles, no sólo paridad de request JSON.
-
-## Etapa 5 — Resolver como boundary de compatibilidad
-
-`bedrock-credential-chain` muestra una versión posterior de `packages/core/src/model-resolver.ts`.
-
-### Resultado resuelto
-
-**[HECHO]** El resolver devuelve conceptualmente:
+`packages/opencode/src/session/llm.ts` ejecuta aproximadamente:
 
 ```text
-Resolved {
-  model       // LanguageModel listo para route execution
-  ref         // identidad durable del catálogo
-  capabilities
-  cost        // pricing del catálogo
-}
+Provider.Service.getLanguage(model)
+        |
+LLMRequestPrep.prepare(...)
+        |
+if experimentalNativeLlm:
+    LLMNativeRuntime.stream(...)
+      supported -> native LLMEvent stream
+      unsupported -> fallback
+        |
+DEFAULT -> ai.streamText(...)
+        |
+LLMAISDK normalization -> LLMEvent
 ```
 
-**[INFERENCIA]** Esto corrige un acoplamiento peligroso: el provider API model id puede diferir de la identidad persistida/mostrada por OpenCode.
+El comentario del propio source denomina el último camino **Default runtime path**.
 
-### Mapping heredado
+Esto significa que AI SDK sigue siendo una dependencia operacional del agent loop legacy-compatible, no sólo código residual.
 
-**[HECHO]** El resolver puede recibir un package `@ai-sdk/*`, mapearlo mediante `AISDKNative.map`, y cargar un provider package nativo si existe.
+### B. Pipeline Core V2
 
-Si no existe mapping, conserva un fallback al loader AI SDK cuando esa dependencia está disponible.
+`packages/core/src/session/runner/llm.ts` trabaja con `LLMClient.Service` y `LLM.request()` directamente. Éste es el consumidor más claro del stack `@opencode-ai/llm` como runtime primario.
 
-**[INFERENCIA]** Esta es una migration adapter explícita: el catálogo no necesita migrarse atómicamente para probar el runtime nativo.
+`SessionRunnerModel` sigue mostrando una migración de catálogo incompleta: el mapping directo desde APIs etiquetadas como AI SDK cubre un subconjunto concreto y no todo el catálogo soportado por `packages/llm`.
 
 ## Credential ownership
 
-La migración también descubre dónde deben vivir las credenciales.
+La separación conceptual sigue siendo válida:
 
-### En route/protocol
+- route/protocol: aplicar auth determinista al wire request;
+- integration/core/provider layer: adquirir/refrescar credenciales, perfiles, OAuth/ADC/default chains.
 
-Debe vivir la operación determinista que aplica auth al request:
-
-- bearer/header;
-- SigV4;
-- query/header API key.
-
-### En core/integration resolver
-
-Debe vivir el lifecycle/discovery:
-
-- OAuth access token;
-- AWS profile/default chain;
-- credential metadata;
-- refresh/re-resolution por turno.
-
-**[HECHO]** `bedrock-credential-chain` implementa exactamente esta separación: core obtiene AWS identity y Bedrock auth sólo firma.
-
-**[INFERENCIA]** Es probable que Azure CLI/AAD y Vertex ADC sigan la misma regla conceptual: auth acquisition fuera del protocol, application dentro de route/facade.
+Las branches de Bedrock, Azure y Vertex son evidencia de esta frontera, pero cada provider debe comprobarse contra `dev` antes de afirmar paridad completa.
 
 ## Provider-specific transforms
 
-**[HECHO]** La migración no elimina transforms provider-specific; los mueve al lugar correcto.
+Retirar AI SDK no elimina diferencias de proveedor. Las desplaza a adapters/facades apropiados:
 
-Ejemplos:
-
-- OpenAI reasoning items/item references;
-- Anthropic tool ordering y thinking signatures;
-- Gemini JSON Schema projection;
-- Bedrock cache points/EventStream;
-- Vertex endpoint derivation;
-- OpenRouter/compatible options.
-
-**[INFERENCIA]** “Remove AI SDK” significa sustituir el runtime/protocol dependency, no eliminar la complejidad propia de los proveedores.
+- reasoning/replay OpenAI;
+- thinking/tool ordering Anthropic;
+- schema/thought signatures Gemini;
+- SigV4/event stream/cache Bedrock;
+- endpoints/credentials de deployments como Vertex/Azure.
 
 ## Streaming contract
 
-Branches `llm-terminal-contract`, `provider-event-tolerance`, `responses-done-message`, `responses-stream-retry`, `bedrock-metadata-terminal`, `gemini-error-frame` revelan un problema común: terminación y error pueden llegar de maneras incompatibles.
-
-**[HECHO]** `dev` resuelve esto con un event vocabulary común y dos paths de error:
-
-- request/transport errors como `LLMError`;
-- provider stream failures como eventos/failures normalizados.
-
-**[INFERENCIA]** Estabilizar este terminal contract era requisito para poder cambiar AI SDK por adapters propios sin alterar el agent loop.
+El vocabulario `LLMEvent` común permite que SessionProcessor y SessionRunner trabajen sobre eventos normalizados aunque el executor sea AI SDK o nativo. Este seam es precisamente lo que hace posible la migración incremental.
 
 ## Usage y coste
 
-**[HECHO]** El runtime nativo normaliza usage pero no pricing.
-
-**[HISTÓRICO]** El `ModelResolver` posterior conserva `cost` desde el catálogo junto al model resuelto.
-
-**[INFERENCIA]** La arquitectura objetivo divide:
-
-```text
-protocol -> token usage observado
-catalog  -> precio/capacidades declaradas
-core     -> accounting / policy
-```
-
-Esta separación hace posible cambiar precios sin tocar adapters y comparar usage entre protocolos heterogéneos.
+El stack nativo normaliza usage, no pricing universal. En paralelo, el path `packages/opencode` todavía tiene lógica de accounting/provider metadata en `Session.getUsage()`. La concentración total de accounting tampoco debe darse por completada.
 
 ## Structured output
 
-**[HISTÓRICO/PENDIENTE]** `STATUS.md` indica que `generateObject` seguía usando principalmente una synthetic tool strategy y que el diseño futuro esperaba structured output nativo donde fuese fiable, con fallback por tools.
+Structured output continúa dependiendo del consumidor. `SessionPrompt` puede materializar una tool sintética `StructuredOutput`; la existencia de protocolos con capacidades nativas no implica que todos los paths las utilicen uniformemente.
 
-**[INFERENCIA]** Éste es un ejemplo de una idea no descartada pero pospuesta por falta de semántica uniforme entre providers.
+## Qué está integrado y qué no
 
-## Qué fue descartado o evitado
+### Integrado en `dev`
 
-No hay evidencia de que se haya descartado el stack nativo; al contrario, gran parte llegó a `dev`.
+- package `packages/llm` y protocolos nativos;
+- `LLMEvent` como vocabulario común;
+- native request/event seams;
+- Core V2 usando `LLMClient`;
+- native runtime opcional en `packages/opencode`;
+- fallback explícito a AI SDK.
 
-Lo que sí parece evitado o retrasado:
+### No consumado globalmente
 
-1. **Registry global obligatorio de providers built-in.** Las facades explícitas son preferidas.
-2. **Asumir OpenAI-compatible = OpenAI.** Se separan profiles y Open Responses.
-3. **Acoplar pricing al protocol adapter.** Usage y cost se separan.
-4. **Meter credential refresh en el signer/parser.** Resolver e Integration poseen lifecycle.
-5. **Activar todos los providers nativos antes de paridad.** Se mantiene fallback AI SDK durante la migración.
-6. **Usar model API id como identidad durable.** Resolver posterior conserva `ref` separado.
+- eliminación de AI SDK del pipeline `SessionPrompt`;
+- activación nativa de todos los providers del catálogo;
+- unificación absoluta de credentials/accounting/structured output en una sola capa.
 
-## Arquitectura objetivo reconstruida
+## Arquitectura de transición
 
 ```mermaid
-flowchart LR
-  C[Catalog] --> R[ModelResolver]
-  I[Integration/Credential] --> R
-  R --> M[Resolved model + ref + capabilities + cost]
-  M --> P[Provider package/facade]
-  P --> RT[Route]
-  RT --> PR[Protocol]
-  RT --> A[Auth application]
-  RT --> T[Transport]
-  Q[Portable LLMRequest] --> PR
-  PR --> W[Wire request]
-  W --> T
-  T --> S[Native stream]
-  S --> PR
-  PR --> E[Portable LLMEvent]
-  E --> AR[Agent/session runtime]
+flowchart TD
+  S[SessionPrompt] --> L[packages/opencode LLM]
+  L --> P[Provider / AI SDK LanguageModel]
+  L -->|flag + support| N[LLMNativeRuntime]
+  N --> LL[packages/llm]
+  L -->|default/fallback| A[AI SDK streamText]
+
+  V[Core SessionRunner V2] --> C[LLMClient]
+  C --> LL
 ```
-
-## Relación con `dev`
-
-**[HECHO]** `dev` ya contiene el núcleo de esta arquitectura en `packages/llm`, pero su `SessionRunnerModel` aún muestra el seam transicional al trabajar con `api.type === "aisdk"` y sólo tres mappings directos.
-
-**[INFERENCIA]** Por tanto, `dev` debe interpretarse como una arquitectura nativa ya establecida en el plano LLM/protocol, con una migración de catálogo/provider resolution todavía incompleta o conservadora.
 
 ## Conclusión
 
-La principal innovación de esta línea de branches no es un adapter concreto. Es convertir la integración LLM en un subsistema compilable y testeable de forma aislada, con boundaries explícitos entre:
-
-- identidad/model catalog;
-- credenciales;
-- provider deployment;
-- protocolo;
-- transporte;
-- stream lifecycle;
-- agent orchestration.
-
-Esa separación permite reemplazar AI SDK de manera incremental sin exigir que cada provider alcance paridad al mismo tiempo.
+La dirección hacia un stack nativo está respaldada por mucho código real, pero la documentación debe medir “migrado” por el composition/runtime path, no por la mera presencia de adapters. A `dev@dc4449df...`, AI SDK sigue siendo el executor por defecto de `SessionPrompt`, mientras Core V2 ya opera directamente sobre el runtime nativo.
