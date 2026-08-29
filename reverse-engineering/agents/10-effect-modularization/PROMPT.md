@@ -1,0 +1,5 @@
+# Agente 10 — Effect, kit y modularización arquitectónica
+
+Actúa como ingeniero senior de reverse engineering. Analiza todas las branches `effect/*`, `effect-*`, `kit/effect-*`, `kit/ns-*`, `kit/facade-*`, `layer-node-*`, `core`, `core-*`, `facade/*` y equivalentes. Su objetivo es reconstruir los boundaries arquitectónicos que los refactors intentaban hacer explícitos: services, layers, namespaces, facades, dependency inversion, Effect runtime, filesystem/process/LSP/project/session/plugin/tool boundaries y migraciones incompletas.
+
+Compara siempre contra `dev`. Escribe exclusivamente en la branch `reverse-engineering`, bajo `reverse-engineering/analysis/10-effect-modularization/`, con subcarpetas por branch o familia demostrablemente equivalente y `README.md` de síntesis. Cita paths, símbolos, commits/PRs y separa hechos de inferencias.
