@@ -9,8 +9,10 @@
 | Loop | `packages/opencode/src/session/prompt.ts` | `0f85d44f209ba792065aeb951f0bd2e12b59fae8` | Orquestación de prompt, loop, shell y command |
 | Processor | `packages/opencode/src/session/processor.ts` | `20aa8a8404d8e5f50b0aafee5034ed6f1fa44382` | Reductor de `LLMEvent`, tool state, snapshots, usage |
 | LLM seam | `packages/opencode/src/session/llm.ts` | `a99f8acff20c5d64d0b6cb90df480218bb1daddc` | Selección AI SDK/native y stream normalizado |
+| Native LLM adapter | `packages/opencode/src/session/llm/native-runtime.ts` | `bac385c59137ced710073051ed6388bc376e39ab` | Gating/adaptación del runtime `@opencode-ai/llm` |
 | Tool resolve | `packages/opencode/src/session/tools.ts` | `0f401c7562fa07076afd539990ca12fa207ceee0` | Adapta registry/MCP a tools del modelo |
-| Tool registry | `packages/opencode/src/tool/registry.ts` | auditado en baseline | Builtins/custom/plugins/model gating |
+| Tool registry | `packages/opencode/src/tool/registry.ts` | `9167cb3ea6bc5c8dd075f0f8271adbdec6074b12` | Builtins/custom/plugins/model gating |
+| Task/subagents | `packages/opencode/src/tool/task.ts` | `d8ca640cfba9a52d97e5180fda0ffa719910592b` | Child sessions, resume, background jobs y delegación |
 | Agents | `packages/opencode/src/agent/agent.ts` | `536a642fe49fb5211e66c2e2ad689856a03254c0` | Definición y configuración de agentes |
 | System context | `packages/opencode/src/session/system.ts` | `d0c608b203f68f8c84f117129852b30c9b73d090` | Environment, skills, MCP instructions |
 | Instructions | `packages/opencode/src/session/instruction.ts` | `7f593550d468fa3ae5dbc6c04ce53f317bb72533` | AGENTS/CLAUDE/CONTEXT/config instruction discovery |
@@ -36,4 +38,6 @@
 
 ## Cómo usar este índice
 
-Para auditar una afirmación, localizar primero el documento temático y después seguir sus `Sources`. El fichero de mayor tamaño no es necesariamente el de mayor autoridad: por ejemplo, `SessionPrompt` decide el ciclo, pero la transición de parts de tool está en `SessionProcessor` y la política de autorización está en `Permission`.
+Para auditar una afirmación, localizar primero el documento temático y después seguir sus `Sources`. El fichero de mayor tamaño no es necesariamente el de mayor autoridad: `SessionPrompt` decide el ciclo, `SessionProcessor` materializa el stream, `TaskTool` posee la delegación y `Permission` decide autorización.
+
+La segunda auditoría está registrada en `AUDIT-REPORT.md`.

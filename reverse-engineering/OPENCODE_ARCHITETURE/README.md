@@ -5,78 +5,38 @@
 > **Repository:** `JRodrigoTech/opencode`  
 > **Audit date:** 2026-08-29
 
-Este árbol documenta mediante ingeniería inversa la arquitectura efectiva de OpenCode en la rama `production`. El objetivo no es repetir la documentación pública, sino reconstruir el comportamiento del sistema desde el código: composición del contexto, state machine del agente, tool runtime, permisos, providers, persistencia, compaction, snapshots, extensibilidad y superficies externas.
+Este árbol documenta mediante ingeniería inversa la arquitectura efectiva de OpenCode en la rama `production`. El objetivo es reconstruir comportamiento desde código: contexto, state machine del agente, tools, permisos, providers, persistencia, compaction, snapshots, extensibilidad y superficies externas.
 
-## Regla de auditoría
+## Audit status
 
-Cada documento separa tres categorías:
+La documentación fue sometida a una **segunda auditoría estática** contra el commit congelado de production. El resultado, correcciones de trazabilidad y límites de validación están en [`AUDIT-REPORT.md`](AUDIT-REPORT.md).
 
-- **VERIFIED-CODE**: afirmación observada directamente en código de la baseline fijada.
-- **DERIVED**: conclusión arquitectónica deducida de varias piezas de código, con las fuentes indicadas.
-- **OPEN**: punto que requiere una auditoría adicional o ejecución controlada; no se presenta como hecho.
+Categorías usadas:
 
-Cuando un fichero crítico coincide byte a byte con el ya estudiado en otra rama, se acepta reutilizar el análisis únicamente si el **blob SHA de Git es idéntico**. La baseline de esta documentación siempre es `production`, no `dev`.
+- **VERIFIED-CODE**: observado directamente en código de la baseline.
+- **DERIVED**: conclusión arquitectónica cruzada entre varias fuentes.
+- **OPEN**: requiere análisis adicional o validación dinámica.
 
-## Mapa de documentación
+## Mapa
 
 ```text
 OPENCODE_ARCHITETURE/
 ├── README.md
 ├── AUDIT-BASELINE.md
+├── AUDIT-REPORT.md
 ├── SOURCE-INDEX.md
-├── 00-architecture/
-│   ├── overview.md
-│   ├── packages-and-boundaries.md
-│   └── dependency-graph.md
-├── 01-agent-runtime/
-│   ├── agent-loop.md
-│   ├── processor-state-machine.md
-│   ├── run-state-and-cancellation.md
-│   └── errors-retries.md
-├── 02-context-engine/
-│   ├── system-prompt.md
-│   ├── model-prompts.md
-│   ├── instructions.md
-│   ├── message-model.md
-│   └── context-assembly.md
-├── 03-agents/
-│   ├── agents.md
-│   ├── subagents.md
-│   ├── task-tool.md
-│   └── permissions-by-agent.md
-├── 04-tools/
-│   ├── tool-runtime.md
-│   ├── registry.md
-│   ├── builtin-tools.md
-│   ├── tool-lifecycle.md
-│   └── permission-engine.md
-├── 05-llm/
-│   ├── llm-abstraction.md
-│   ├── ai-sdk-runtime.md
-│   ├── native-runtime.md
-│   ├── provider-transform.md
-│   └── provider-matrix.md
-├── 06-memory-state/
-│   ├── sessions.md
-│   ├── messages-and-parts.md
-│   ├── compaction.md
-│   ├── snapshots.md
-│   └── revert.md
-├── 07-extensibility/
-│   ├── mcp.md
-│   ├── plugins.md
-│   ├── skills.md
-│   └── code-mode.md
-└── 08-interfaces/
-    ├── server-api.md
-    ├── acp.md
-    ├── cli.md
-    └── clients.md
+├── 00-architecture/       # boundaries y dependency graph
+├── 01-agent-runtime/      # loop, processor, cancellation, retry
+├── 02-context-engine/     # prompt/context/instructions/messages
+├── 03-agents/             # agents, subagents, TaskTool, policy
+├── 04-tools/              # registry, lifecycle, permission engine
+├── 05-llm/                # AI SDK/native/provider adaptation
+├── 06-memory-state/       # sessions, compaction, snapshot/revert
+├── 07-extensibility/      # MCP, plugins, skills, Code Mode
+└── 08-interfaces/         # HTTP/server, ACP, CLI, clients
 ```
 
 ## Lectura recomendada
-
-Para entender el agente, el orden más eficiente es:
 
 1. `00-architecture/overview.md`
 2. `01-agent-runtime/agent-loop.md`
@@ -91,6 +51,6 @@ Para entender el agente, el orden más eficiente es:
 
 ## Tesis arquitectónica
 
-OpenCode production es un **agent runtime dirigido por eventos** construido sobre Effect. `SessionPrompt` orquesta turnos y ciclos; `SessionProcessor` reduce un stream normalizado de `LLMEvent` a mensajes y partes persistentes; `SessionTools` y `ToolRegistry` producen el conjunto de capacidades visible para el modelo; `Permission` aplica políticas; `LLM` abstrae el transporte y normaliza dos runtimes posibles; `SessionCompaction`, `Snapshot` y `SessionRevert` proporcionan continuidad y reversibilidad.
+OpenCode production es un **agent runtime stateful dirigido por eventos** sobre Effect. `SessionPrompt` orquesta; `SessionProcessor` reduce `LLMEvent` a estado persistente; `SessionTools` y `ToolRegistry` construyen capacidades; `Permission` aplica policy; `LLM` normaliza AI SDK/native; `SessionCompaction`, `Snapshot` y `SessionRevert` aportan continuidad y reversibilidad.
 
-La unidad fundamental no es “un prompt”, sino una **Session** cuyo estado se materializa como mensajes y parts, y cuya ejecución puede producir múltiples steps y tool calls antes de volver a `idle`.
+La unidad fundamental no es un prompt aislado sino una **Session** cuyos messages/parts registran diálogo, reasoning, tools, steps, patches y errores, y cuya ejecución puede abarcar múltiples model turns antes de volver a `idle`.

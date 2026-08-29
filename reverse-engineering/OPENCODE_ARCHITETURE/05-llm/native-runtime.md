@@ -4,47 +4,53 @@
 
 ## Purpose
 
-El runtime nativo integra `@opencode-ai/llm` como alternativa al AI SDK manteniendo la interfaz `LLMEvent` del host.
+El runtime nativo integra `@opencode-ai/llm` como alternativa experimental al AI SDK manteniendo el mismo stream `LLMEvent` consumido por `SessionProcessor`.
 
-## Support gating
+## Exact support gating
 
-La integración inspecciona provider package/API y limita el uso nativo a combinaciones soportadas. En la baseline se reconoce soporte para familias OpenAI/OpenAI-compatible y Anthropic, incluyendo provider IDs `opencode*` bajo condiciones definidas.
+`LLMNativeRuntime.status()` exige simultáneamente:
+
+1. provider ID `openai`, `anthropic` o prefijo `opencode`;
+2. package de model API `@ai-sdk/openai`, `@ai-sdk/openai-compatible` o `@ai-sdk/anthropic`;
+3. auth compatible; OAuth requiere provider fetch override en el caso soportado;
+4. API key resoluble desde provider options/key.
+
+Si alguna condición falla, devuelve `{ type: "unsupported", reason }`. `session/llm.ts` registra la razón y hace fallback explícito a AI SDK.
 
 ## Request mapping
 
-Convierte:
+La integración convierte model/provider metadata, messages, tools, tool choice, sampling, output limit, headers/auth y provider options a `LLMRequest`.
 
-- model/provider metadata;
-- system/messages;
-- tools;
-- tool choice;
-- sampling/options;
-- headers/auth;
-
-al `LLMRequest` del package nativo.
+`ProviderTransform.message()` y `ProviderTransform.providerOptions()` siguen siendo parte del boundary; el comentario de implementación deja claro que los AI-SDK-shaped options y el SDK nativo deben referirse a los mismos wire fields oficiales.
 
 ## Tool bridge
 
-Las tools OpenCode se convierten a definitions de `@opencode-ai/llm`. El dispatcher conecta las tool calls nativas de vuelta al executor del host y reinyecta tool result/error events en el stream.
+Las tools OpenCode se convierten a `NativeTool`. **La ejecución sigue siendo propiedad de OpenCode**: el adapter invoca el `Tool.execute` del host con call ID, messages y abort signal. `ToolRuntime.dispatch` genera los eventos de result/error que se concatenan al stream nativo.
 
-## Compatibility intent
+Las tool calls marcadas `providerExecuted` no se redispatchan localmente.
 
-El código documenta explícitamente que provider options con shape de AI SDK y el SDK nativo deben mapear a los mismos official wire fields. El objetivo es reducir divergencia semántica durante la migración.
+## Common event contract
 
-## Risk surface
+- native path: ya produce `LLMEvent`;
+- AI SDK path: `LLMAISDK.toLLMEvents()` convierte `fullStream` a `LLMEvent`.
 
-La principal zona a validar dinámicamente al comparar ambos runtimes es:
+Ese contrato común es el seam que desacopla `SessionProcessor` de los dos runtimes.
+
+## Risk surface for dynamic validation
+
+La auditoría estática no demuestra equivalencia temporal perfecta. Deben probarse dinámicamente:
 
 - ordering de events;
-- metadata/provider usage;
-- tool argument/result serialization;
+- provider metadata/usage;
+- tool serialization y provider-executed calls;
 - reasoning blocks;
 - stop/finish reasons;
 - cache policy;
-- request option equivalence.
+- cancel/retry timing.
 
 ## Sources
 
-- `packages/opencode/src/session/llm/native-runtime.ts`
-- `packages/llm/src/llm.ts`
-- `packages/llm/src/tool-runtime.ts`
+- `packages/opencode/src/session/llm/native-runtime.ts` — `bac385c59137ced710073051ed6388bc376e39ab`
+- `packages/opencode/src/session/llm.ts` — `a99f8acff20c5d64d0b6cb90df480218bb1daddc`
+- `packages/llm/src/llm.ts` — `e4781d8608b0185c500866aae20fda8335640550`
+- `packages/llm/src/tool-runtime.ts` — `d69bbb9d478ca532a1481e8d7502c8e5c2b55dc6`
