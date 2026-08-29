@@ -4,235 +4,225 @@
 
 ### Hecho confirmado
 
-La arquitectura vigente separa tres responsabilidades que antes estaban mezcladas:
+El composition root del backend vigente sigue en `packages/opencode`:
 
-1. **Contrato de transporte** en `packages/protocol`.
-2. **Implementación del servidor** en `packages/server`.
-3. **Consumers** en CLI, desktop y clients generados/adaptadores.
+- `packages/opencode/src/server/server.ts` posee el listener y expone el handler in-process;
+- `packages/opencode/src/server/routes/instance/httpapi/server.ts` compone routes, middleware y service graph.
 
-El boundary central ya no es una clase o singleton `Server` en `packages/opencode`, sino un contrato `HttpApi` compuesto de grupos tipados.
+Al mismo tiempo, parte del contrato/implementación ya está extraída a `packages/protocol` y `packages/server`.
 
-### Contrato
-
-`packages/protocol/src/api.ts` agrega grupos funcionales. Los grupos contienen:
-
-- método y path HTTP;
-- schema de query, path params y payload;
-- schema de success/error;
-- middleware asociado;
-- metadata OpenAPI;
-- en casos especiales, semántica de stream SSE o upgrade WebSocket.
-
-Ejemplos relevantes:
-
-- `HealthGroup`: `GET /api/health`.
-- `EventGroup`: `GET /api/event`, declarado como `StreamSse`.
-- `makeSessionGroup(...)`: CRUD y comandos de sesión, history y event stream.
-- `PtyGroup`: HTTP para lifecycle de PTY y WebSocket para connect.
-
-### Implementación
-
-`packages/server/src/api.ts` liga el `HttpApi` de protocol con middleware de servidor.
-
-`packages/server/src/handlers.ts` y `packages/server/src/handlers/*` registran implementaciones mediante `HttpApiBuilder.group`.
-
-`packages/server/src/routes.ts` compone:
-
-- handlers tipados;
-- middleware de auth;
-- CORS;
-- observability;
-- services de dominio;
-- OpenAPI;
-- fallback/not-found.
-
-### Inferencia
-
-El diseño persigue que `protocol` sea un boundary estable que pueda ser consumido por varios runtimes sin conocer detalles del proceso que hospeda el servidor. La evidencia fuerte es que los mismos contratos sirven para listener HTTP, client generation y experimentos RPC/embedded.
-
----
-
-## 2. Arquitectura anterior: servidor Hono dentro de `packages/opencode`
-
-### Hecho confirmado
-
-En ramas antiguas como `refactor/node-server-adapter` el servidor principal vive en:
-
-`packages/opencode/src/server/server.ts`
-
-La función `Server.createApp(...)` construye un `Hono` y concentra:
-
-- logging;
-- CORS;
-- Basic Auth;
-- routing global e instance-scoped;
-- `GET /openapi`;
-- error handling;
-- WebSocket upgrade injection;
-- health y event routing;
-- listener startup con `Bun.serve` o adapter Node.
-
-La misma unidad expone `Server.Default()` y `Server.listen(...)`.
-
-### Diferencia estructural con `dev`
-
-Antes:
+La forma correcta de describir `dev` es por tanto:
 
 ```text
-Server singleton
-  ├─ Hono app
-  ├─ middleware
-  ├─ routing
-  ├─ instance context
-  ├─ SSE / websocket glue
-  ├─ listener choice
-  └─ OpenAPI
+packages/opencode server host
+        |
+        +--> routes/handlers locales todavía no extraídos
+        +--> @opencode-ai/server Api + handlers extraídos
+        +--> protocol/core contracts y services
 ```
 
-Ahora:
+No es correcto afirmar que el boundary central “ya no” esté en `packages/opencode`: el host real continúa allí.
+
+---
+
+## 2. Listener vigente: Effect + Node
+
+`packages/opencode/src/server/server.ts` usa:
+
+- `@effect/platform-node`;
+- `effect/unstable/http`;
+- `effect/unstable/httpapi` para OpenAPI;
+- `node:http`.
+
+`Server.Default()` obtiene el `webHandler` de `HttpApiApp` y expone:
 
 ```text
-protocol.HttpApi
-  ├─ contracts
-  └─ schemas
-       │
-server
-  ├─ handlers
-  ├─ auth/cors/location middleware
-  └─ listener/routes composition
-       │
-clients / desktop / cli
+app.fetch(Request)
+app.request(url/request, init)
 ```
 
-### Interpretación evolutiva
+`Server.listen()` monta el mismo application handler sobre un listener Node y devuelve hostname, port, URL y `stop()`.
 
-La separación actual reduce tres acoplamientos históricos:
+### Lifecycle confirmado
 
-1. contrato ↔ framework Hono;
-2. routing ↔ process listener;
-3. SDK ↔ estructura interna del servidor.
+- si el port solicitado es `0`, primero intenta 4096 y después un port libre;
+- cada listener obtiene su propio `ConfigProvider.fromEnv()`;
+- el listener posee un `Scope` Effect;
+- puede publicar mDNS si procede;
+- `stop(true)` fuerza cierre de conexiones HTTP activas;
+- `WebSocketTracker` participa en el cierre de WebSockets;
+- la URL global se limpia cuando se cierra el scope correspondiente.
 
----
-
-## 3. Migración Hono → Effect HttpApi
-
-### Evidencia directa
-
-La familia `kit/httpapi-*` contiene una migración incremental explícita. El commit `2b028287e21ae5931d6654738872c7b5ba9bc55a` (`kit/httpapi-route-inventory-current`) añade un script que inspecciona las rutas registradas de Hono y las clasifica como:
-
-- `bridged`;
-- `next`;
-- `later`;
-- `special`.
-
-El inventario marca `event`, `pty` y `tui` como especiales por sus transports/semánticas.
-
-### Hecho confirmado
-
-No se intentó reescribir todo de una vez. La estrategia fue:
-
-1. mantener Hono como surface existente;
-2. implementar grupos `HttpApi` para subconjuntos;
-3. montar un bridge;
-4. conservar fallback hacia rutas Hono;
-5. generar/inventariar paridad;
-6. mover progresivamente rutas al nuevo contrato.
-
-El commit `f346024f0e0d1d98bfa83c8f1216bf988af2abc1` en `backend-adapter-v2` corrige precisamente el sharing del router entre rutas API y fallback, evidencia de coexistencia durante la transición.
-
-### Resultado en `dev`
-
-La arquitectura que era un bridge incremental pasa a ser la estructura primaria: `packages/protocol` y `packages/server` son paquetes separados.
+Éste es código **vigente en `dev`**, no arquitectura histórica.
 
 ---
 
-## 4. Boundary de transporte: lógico frente a físico
+## 3. Composition root de rutas
+
+`packages/opencode/src/server/routes/instance/httpapi/server.ts` muestra la coexistencia de varias capas.
+
+### Rutas todavía compuestas localmente
+
+Define/monta, entre otras:
+
+- `RootHttpApi`;
+- `InstanceHttpApi`;
+- `EventApi`;
+- `PtyConnectApi`;
+- handlers de config, control, experimental, file, global, instance, MCP, permission, project, provider, PTY, question, session, sync, TUI y workspace.
+
+### Rutas extraídas
+
+También monta:
+
+```text
+const serverRoutes = HttpApiBuilder.layer(Api)
+```
+
+donde `Api` y `handlers` provienen de `@opencode-ai/server`.
+
+Por tanto la extracción no es hipotética, pero tampoco total.
+
+### Service graph
+
+El mismo archivo compone nodos como:
+
+- `SessionPrompt`;
+- `SessionProcessor`;
+- `SessionCompaction`;
+- `LLM`;
+- `MCP`;
+- `ToolRegistry`;
+- `EventV2Bridge`;
+- `SessionProjector`;
+- `EventV2`;
+- Project/Core services y otros.
+
+Esto hace del server host un anti-corruption/composition layer durante la transición.
+
+---
+
+## 4. `packages/protocol` y `packages/server`
 
 ### Hecho confirmado
 
-La arquitectura admite al menos tres formas de atravesar el mismo boundary conceptual:
+Son packages reales con responsabilidades extraídas:
 
-1. HTTP sobre TCP hacia listener local/remoto.
-2. Un `fetch` in-process contra un server embebido.
-3. En `websocket-rpc`, RPC derivado del mismo contrato sobre un WebSocket.
+- `packages/protocol`: contratos/schemas reutilizables;
+- `packages/server`: API/handlers/middleware reutilizables para grupos ya migrados.
 
-`embedded-server-dispose` encapsula un server in-process y construye un `fetch` que llama `server.app.fetch(...)`. El cliente sigue usando una URL sintética (`http://opencode.internal`) aunque no haya socket físico.
+Estos packages reducen el acoplamiento entre contrato HTTP y host de aplicación.
 
 ### Inferencia fuerte
 
-El verdadero boundary del backend es **request/response/stream semantics + schemas**, no “HTTP como red”. El transporte de red es una materialización del contrato.
-
-Esto explica por qué:
-
-- el desktop puede tratar un sidecar como servidor remoto aunque viva en la misma máquina;
-- el CLI puede usar un server embebido;
-- un RPC WebSocket puede derivarse del `HttpApi` sin reescribir el dominio.
+La dirección de la arquitectura es mover el boundary contractual fuera de `packages/opencode`, pero `dev` muestra una migración incremental, no un corte atómico.
 
 ---
 
-## 5. Boundaries internos observables
+## 5. Arquitectura histórica Hono
 
-### 5.1 Listener / application
+Branches antiguas como `refactor/node-server-adapter` sí contienen una generación donde `packages/opencode/src/server/server.ts` construía un `Hono` y concentraba routing, middleware, OpenAPI y listener concerns.
 
-El listener es reemplazable. Históricamente hubo Bun y Node adapters; `refactor/node-server-adapter` añade `@hono/node-server` sin cambiar el resto del routing.
+Esa versión debe etiquetarse **histórica**.
 
-**Conclusión:** el listener no es el backend domain boundary.
+La comparación correcta es:
 
-### 5.2 Protocol / implementation
+```text
+HISTÓRICO
+Hono singleton/app monolítica
+        |
+        v
+MIGRACIÓN
+bridges + HttpApi groups
+        |
+        v
+DEV ACTUAL
+Effect/Node host en packages/opencode
++ contracts/handlers parcialmente extraídos
+```
 
-Los grupos de `protocol` no dependen de core implementations; los handlers sí.
-
-**Conclusión:** éste es un boundary contractual real.
-
-### 5.3 Location / session
-
-Muchas APIs trabajan bajo un location context, pero las sesiones además tienen middleware de resolución propio.
-
-**Conclusión:** el servidor no es un simple CRUD global; existe scoping explícito por directory/workspace/session.
-
-### 5.4 Process supervisor / API server
-
-El daemon/desktop supervisor decide cómo arrancar, descubrir, autenticar y detener el servidor, pero el API se consume por la misma superficie.
-
-**Conclusión:** process lifecycle está deliberadamente fuera del core del HTTP API.
-
-### 5.5 Special transports
-
-SSE y PTY WebSocket se modelan como excepciones puntuales, no como un transport universal.
-
-**Conclusión:** `dev` favorece HTTP convencional para commands/queries y transports streaming únicamente donde aportan semántica necesaria.
+La coincidencia del path `packages/opencode/src/server/server.ts` entre generaciones no implica que el contenido/arquitectura actual siga siendo Hono.
 
 ---
 
-## 6. Qué llegó a `dev` y qué quedó atrás
+## 6. Boundary lógico frente a transporte físico
 
-### Llegó a `dev`
+`Server.Default().app.fetch` demuestra en el baseline que el application boundary puede cruzarse in-process sin socket físico. `Server.listen()` materializa el mismo handler sobre HTTP.
 
-- contratos declarativos con schemas;
-- OpenAPI derivado del contrato;
-- separación protocol/server;
-- middleware tipado;
-- SSE global;
-- stream durable por sesión;
-- WebSocket específico para PTY;
-- auth del listener;
-- sidecar/daemon supervisado fuera del server package;
-- capacidad de abstraer el backend detrás de client/adapters.
+Por tanto:
 
-### Fue sustituido o no es baseline
+```text
+application semantics != socket TCP
+```
 
-- singleton Hono como arquitectura central;
-- bridge Hono/Effect como mecanismo permanente;
-- RPC WebSocket universal;
-- managed-service client API extensa tal como existía en `client-service`;
-- elección de listener Bun/Node dentro del antiguo singleton Server como preocupación de aplicación.
+El contrato request/response/stream puede reutilizarse en topologías embebidas o en listener real.
 
-## 7. Hechos vs hipótesis
+---
 
-### Confirmado
+## 7. Middleware y scoping
 
-La estructura de paquetes, contratos, handlers, SSE, PTY WebSocket, daemon y desktop sidecar descrita aquí existe en código o commits inspeccionados.
+El composition root actual aplica capas específicas para:
 
-### Hipótesis
+- authorization;
+- workspace routing;
+- instance context;
+- schema errors;
+- CORS;
+- compression/error/fence y otras capas según route group.
 
-Que el objetivo explícito de la separación fuese soportar múltiples transports futuros no aparece como una única declaración normativa. Sin embargo, la coexistencia de HttpApi, embedded fetch y WebSocket RPC derivado del contrato hace esa interpretación altamente consistente con la evidencia.
+Esto confirma que location/workspace/session routing son concerns de frontera y no lógica que cada handler deba reconstruir individualmente.
+
+---
+
+## 8. Special transports
+
+### SSE
+
+Los eventos globales extraídos usan SSE. `packages/server/src/handlers/event.ts` crea una suscripción acotada, emite `server.connected` y heartbeat.
+
+### PTY WebSocket
+
+PTY conserva upgrade WebSocket/ticket-aware auth como excepción bidireccional específica.
+
+### WebSocket RPC
+
+Las branches de RPC WebSocket son experimentales/aditivas. No son el transport universal vigente de `dev`.
+
+---
+
+## 9. Process lifecycle fuera del API domain
+
+Daemon/desktop supervisan procesos, discovery, health, auth y shutdown. El HTTP API no debe confundirse con ese lifecycle de proceso.
+
+Este boundary sí es estable conceptualmente:
+
+```text
+process supervisor -> starts/discovers server
+client             -> consumes API
+server host         -> composes domain services
+```
+
+---
+
+## 10. Qué está consolidado y qué sigue en transición
+
+### Consolidado
+
+- listener Effect/Node;
+- handler in-process;
+- HttpApi declarativo;
+- contracts y handlers extraídos en packages dedicados;
+- auth/routing middleware;
+- SSE global y PTY WebSocket;
+- composición mediante Effect layers/nodes.
+
+### En transición
+
+- ownership completo de todos los route groups;
+- división `packages/opencode` ↔ `packages/server`;
+- coexistencia de services legacy-compatible y V2;
+- clientes/surfaces que aún dependen de compatibilidad histórica.
+
+## Conclusión
+
+El boundary actual no puede reducirse a `packages/server`. En `dev`, **`packages/opencode` sigue siendo el host de aplicación**, mientras `packages/protocol` y `packages/server` constituyen la extracción progresiva del contrato y de partes de la implementación. Esa formulación coincide con el composition root real y evita confundir la arquitectura objetivo con la ya ejecutada.
