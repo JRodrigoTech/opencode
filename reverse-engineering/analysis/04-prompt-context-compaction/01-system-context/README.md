@@ -1,10 +1,12 @@
 # System context y context epoch
 
-## Resumen
+## Corrección de alcance
 
-**CONFIRMADO EN `dev`:** el contexto privilegiado del modelo está modelado como un conjunto de fuentes observables, no como una única cadena generada ad hoc. Las fuentes se ensamblan mediante `SystemContext`; el estado que el modelo ya conoce se persiste por sesión mediante `SessionContextEpoch`.
+`SystemContext` y `SessionContextEpoch` existen y están implementados en `dev`, pero pertenecen al **pipeline V2/Core**. No son la única ni la principal forma en que `packages/opencode` construye hoy el contexto del modelo.
 
-## Piezas principales
+El composition root del producto sigue cableando `SessionPrompt`, `SystemPrompt` e `Instruction`; por tanto, toda afirmación de este documento debe leerse como **“confirmado en el runner V2 de `dev`”**, no como “único runtime de OpenCode”.
+
+## Pipeline V2/Core
 
 ### `SystemContext`
 
@@ -12,110 +14,84 @@ Archivo: `packages/core/src/system-context/index.ts`.
 
 Responsabilidades:
 
-- registrar fuentes de contexto por clave estable;
-- producir el baseline inicial de cada fuente;
-- refrescar la fuente antes de nuevos requests;
-- comparar el estado observado contra el snapshot conocido por la sesión;
-- producir un `update` textual cuando cambia una fuente;
-- distinguir entre una fuente realmente eliminada y una fuente temporalmente `unavailable`.
+- representar fuentes de contexto mediante identidad estable;
+- producir baseline;
+- observar/refrescar fuentes;
+- calcular updates por fuente;
+- distinguir una fuente eliminada de una observación temporalmente `unavailable`.
 
-Una fuente no necesita representar instrucciones. Puede representar contexto operativo, entorno, proyecto o estado externo.
-
-**CONFIRMADO EN `dev`:** el sistema conserva la identidad de la fuente además de su texto. Esto permite razonar sobre cambios por fuente en vez de tratar cada system message como una cadena opaca.
+Una fuente puede representar instrucciones, entorno, proyecto u otro estado operativo.
 
 ### Builtins
 
 Archivo: `packages/core/src/system-context/builtins.ts`.
 
-Entre las fuentes base aparecen datos como:
+Incluye contexto como working directory/workspace, información Git, plataforma y fecha. La propiedad arquitectónica relevante es que estos datos se modelan como fuentes observables, no como una sola cadena anónima.
 
-- working directory;
-- workspace/project root;
-- información Git;
-- plataforma/entorno;
-- fecha actual.
+### Instrucciones
 
-El contenido exacto puede evolucionar, pero la idea estructural es estable: datos de entorno se integran como contexto privilegiado observable.
+`packages/core/src/instruction-context.ts` integra instrucciones ambientales en este mismo modelo de fuente/snapshot.
 
-### Instrucciones como fuente
-
-Archivo: `packages/core/src/instruction-context.ts`.
-
-Las instrucciones ambientales se exponen como una fuente propia de `SystemContext`. La consecuencia es importante: `AGENTS.md` y archivos equivalentes dejan de ser únicamente texto concatenado al prompt y pasan a formar parte de un estado contextual con identidad, refresh y diff.
-
-## `SessionContextEpoch`
+### `SessionContextEpoch`
 
 Archivo: `packages/core/src/session/context-epoch.ts`.
 
-### Qué persiste
+Mantiene por sesión:
 
-**CONFIRMADO EN `dev`:** por sesión se conserva al menos:
+- baseline de contexto privilegiado;
+- snapshot codificado de las fuentes conocidas;
+- frontera de secuencia asociada;
+- integración con la historia/compaction V2.
 
-- baseline textual de contexto privilegiado;
-- snapshot codificado de las fuentes que originaron ese baseline;
-- secuencia/frontera del historial a la que corresponde;
-- relación con la compaction más reciente cuando procede.
+El snapshot representa lo que el modelo ya fue informado, no simplemente el estado físico instantáneo del filesystem.
 
-El snapshot expresa lo que el modelo ya ha sido informado sobre cada fuente. No equivale necesariamente al estado físico actual del workspace.
-
-### Reconciliação
-
-Antes de construir un request nuevo:
-
-1. se observa el estado actual de las fuentes;
-2. se carga el snapshot de la sesión;
-3. se calculan diferencias fuente a fuente;
-4. los cambios se emiten como mensajes `system` posteriores al baseline;
-5. el snapshot persistido se actualiza para reflejar el contexto que el modelo acaba de recibir.
+Antes de un request V2, el runner inicializa/prepara el epoch, compara fuentes y puede persistir updates `system` cronológicos.
 
 ### `unavailable` no significa `removed`
 
-**CONFIRMADO EN `dev` y reforzado por la línea `instruction-read-race`:** si una fuente no puede leerse de forma fiable durante una observación, el sistema debe evitar inferir que desapareció. De lo contrario produciría un update falso que retiraría instrucciones o contexto previamente admitido.
+Esta distinción está implementada para evitar retirar contexto previamente admitido por una lectura transitoria fallida.
 
-## Relación con `context-checkpoint`
+## Cómo entra al request V2
 
-**CONFIRMADO EN BRANCH:** `context-checkpoint` formulaba explícitamente el checkpoint como “lo que el modelo cree” sobre un conjunto de fuentes. Los updates eran mensajes system cronológicos y una compaction servía para rebaselinar.
+`packages/core/src/session/runner/llm.ts` construye `request.system` con:
 
-**EVOLUCIÓN HACIA `dev`:** esa semántica se conserva, pero el diseño vigente utiliza un snapshot más estructurado y el concepto de `ContextEpoch`.
-
-## Relación con `system-context`
-
-**CONFIRMADO EN BRANCH:** la branch `system-context` formaliza la separación entre proveedores de contexto y el runner. Es una de las evidencias más claras de que el prompt dejó de ser responsabilidad exclusiva de `session-prompt`.
-
-**CONFIRMADO EN `dev`:** el concepto está integrado: existe el paquete `system-context` y el runner consume su baseline/snapshot a través del epoch de sesión.
-
-## Frontera arquitectónica
-
-```mermaid
-flowchart LR
-  S1[Builtins] --> SC[SystemContext]
-  S2[InstructionContext] --> SC
-  S3[Otras fuentes] --> SC
-  SC --> CE[SessionContextEpoch]
-  CE --> B[Baseline persistente]
-  CE --> U[System updates]
-  B --> R[LLM request]
-  U --> R
+```text
+agent.info?.system
+system.baseline
 ```
 
-## Efecto sobre el system prompt
+Los updates posteriores al baseline permanecen en la historia proyectada.
 
-**CONFIRMADO EN `dev`:** la parte `system` del request no se obtiene únicamente de las instrucciones del agente. El runner combina el `system` propio del agente con el baseline privilegiado del epoch.
+## Lo que hace el path de producto de `packages/opencode`
 
-Los cambios de contexto ocurridos después del baseline se mantienen en el historial como mensajes `system`, conservando orden temporal.
+El runtime cableado por `SessionPrompt` utiliza otro mecanismo:
 
-## Fork, revert y compaction
+- `SystemPrompt.environment(model)` genera contexto de entorno y referencias;
+- `Instruction.system()` lee instrucciones globales/proyecto/configuradas;
+- `SystemPrompt.skills(agent)` añade catálogo/guidance de skills;
+- `SystemPrompt.mcp(agent, permission)` añade instrucciones MCP;
+- `SessionPrompt` concatena esos elementos en el `system` enviado a `SessionProcessor`/`LLM`.
 
-**INFERENCIA, confianza alta:** al estar el snapshot ligado a una frontera de historial, operaciones que reescriben la historia no pueden tratar el contexto como una variable global independiente. El diseño de checkpoint/epoch existe precisamente para alinear “qué sabe el modelo” con la historia efectiva de la sesión.
+Ese path **no depende de `SessionContextEpoch` para ensamblar el system prompt del turno**.
 
-La branch `context-checkpoint` hacía esta preocupación explícita. En `dev`, la persistencia por secuencia y la integración con compaction son la materialización de la misma necesidad.
+## Relación evolutiva
+
+Las branches `context-checkpoint`, `system-context` y `feat/core-v2-session-context-epoch` son evidencia clara de la evolución hacia estado contextual durable. Esa arquitectura está materializada en Core V2, pero convive con la construcción legacy-compatible en `packages/opencode`.
+
+## Boundary correcto
+
+Para V2:
+
+```text
+fuentes dinámicas -> snapshot conocido por sesión -> baseline + deltas -> request
+```
+
+Para el path `packages/opencode`:
+
+```text
+config/filesystem/runtime -> SystemPrompt + Instruction -> system[] del turno
+```
 
 ## Conclusión
 
-El boundary real no es `prompt -> string`, sino:
-
-```text
-fuentes dinámicas -> snapshot conocido por sesión -> baseline + deltas ordenados -> request
-```
-
-Esto hace que el contexto de sistema sea reproducible, incremental y durable, y permite que una conversación larga sobreviva a compactions sin perder la distinción entre estado actual, estado conocido e historia.
+La aportación de `SystemContext` es convertir el contexto privilegiado en estado observable y versionable por sesión. Es una arquitectura real en `dev`, pero debe documentarse como **pipeline V2/Core coexistente**, no como reemplazo ya consumado de `SessionPrompt`.
