@@ -1,175 +1,174 @@
 # Sincronización entre backend y clientes
 
-## 1. Superficies de sincronización
+## Baseline auditada
 
-La sincronización de Session no depende de un único mecanismo. En `dev` convergen:
+Contrastado contra `dev@dc4449df0d52199704ea4989a5a993ebbc605612`.
 
-- queries de estado proyectado (`SessionStore`, Session APIs);
-- event streams live/publicados;
-- historial durable por Session;
-- bridge de compatibilidad V2 → eventos legacy;
-- SDK/protocolo generado.
+## 1. No existe un único mecanismo de sync
 
-Esto permite bootstrap + seguimiento incremental.
+En `dev` convergen:
 
-## 2. Bootstrap mediante proyecciones
+- APIs de estado materializado;
+- proyecciones SQLite;
+- event stream global publicado;
+- history/stream durable por Session;
+- `EventV2Bridge` para surfaces `packages/opencode`;
+- SDK/protocol contracts.
 
-Un cliente puede leer Sessions/messages materializados desde SQLite a través de APIs/SDK.
+La estrategia permite bootstrap desde estado actual y seguimiento incremental, pero cada surface tiene ordering y durability propios.
 
-`session-store-reads`, commit `bc922b8ac590a48ae0fa4b14919c04f2886022d5`, formaliza el read side:
+## 2. Bootstrap desde read models
 
-- Session list estable y paginado;
-- messages paginados por `session_message.seq`.
+`SessionV2.Service` puede listar Sessions y mensajes desde las proyecciones SQLite. `SessionStore` es una dependencia read-side más estrecha para get/context/runnerContext/message, no el dueño actual de todas las queries paginadas.
 
-**Inferencia:** el cliente no necesita replayar todo el event log desde cero para obtener una vista inicial utilizable.
+Un cliente no necesita replayar el event log completo desde el origen para obtener una vista inicial.
 
-## 3. Follow mediante events
+## 3. Ordering: varias unidades distintas
 
-Después del bootstrap, eventos publicados permiten mantener la UI/runtime actualizado.
+### Session list V2
 
-La branch `session-event-stream` demuestra que existe un requisito explícito de ordering. Commit `5146f01e0a8826318056fdb38477fb0202c29099`: `fix(sdk): preserve session stream ordering`.
-
-**Hecho confirmado:** los consumers no deben asumir que concurrencia de red/handlers conserva el orden lógico por sí sola.
-
-## 4. Protocol event surface
-
-`protocol-events`, especialmente `6ad5ce39beb88ababd7d429e45769ea61b2795d2`, define la “current event surface” y sus tests de group boundary.
-
-Esto sitúa el catálogo de eventos en el contrato entre backend y consumidores, no sólo dentro del runner.
-
-## 5. Published vs durable
-
-`published-events`, commit `95f264e04eca61b4a81ef92ee29476556d299a68`, distingue durability de publication.
-
-Consecuencia para clientes:
-
-- algunos eventos live pueden ser útiles para animación/progreso pero no reaparecen en replay;
-- boundaries durables sí pueden formar parte de historia/sync;
-- un reconnect debe reconstruir el estado final desde durable/projections, no depender de haber recibido todos los deltas live.
-
-Ejemplo principal: `Text.Delta` es live-only, `Text.Ended` contiene el texto replayable completo.
-
-## 6. Bridge de compatibilidad
-
-`packages/opencode/src/event-v2-bridge.ts` adapta eventos V2 a superficies legacy de Bus/eventos que todavía consumen componentes históricos.
-
-**Hecho confirmado:** la migración V2 no exige que todos los clientes internos cambien simultáneamente.
-
-**Inferencia:** el bridge funciona como anti-corruption layer durante la transición de protocolos.
-
-## 7. SDK
-
-Los cambios de event schemas regeneran tipos del SDK/OpenAPI. `normalize-step-event-versions` muestra de forma directa que cambiar la versión de `session.next.step.ended/failed` modifica tipos sync generados.
-
-La branch `session-forking` también actualizó cliente generado al añadir `session.fork`.
-
-**Hecho confirmado:** schema/protocolo es fuente para generar contratos cliente y, por tanto, cambios de eventos no quedan confinados al backend.
-
-## 8. Ordering visible por el cliente
-
-Debe distinguirse:
-
-- orden de Session list: `time_updated` + tie-break ID;
-- orden de timeline/messages V2: `seq`;
-- orden de event history: aggregate `seq`;
-- chunks live: orden de stream mientras la conexión permanece activa;
-- diagnostics locales CLI: anchors/created time.
-
-No existe un único “orden por ID” válido para todos esos dominios.
-
-## 9. Reconnect y recovery
-
-La combinación esperable es:
+`SessionV2.list()` ordena actualmente por:
 
 ```text
-reconnect
-   |
-   +--> cargar proyección / historial durable
-   |
-   +--> establecer stream live desde boundary conocido
-   |
-   +--> aplicar eventos posteriores en orden
+time_created + Session ID tie-breaker
 ```
 
-**Inferencia:** `seq` ofrece el boundary natural para detectar qué historia durable precede a lo live, aunque cada API concreta puede encapsularlo de manera diferente.
+con anchors y dirección previous/next.
 
-## 10. Event batching
+### Session list legacy-compatible
 
-Batching puede reducir overhead de transporte, pero no puede alterar el orden lógico de cada Session. Los consumers deben poder desempaquetar/aplicar eventos respetando sequence.
+`packages/opencode/src/session/session.ts` posee sus propias queries y en algunas surfaces ordena por `time_updated`. No debe trasladarse ese criterio al list V2.
 
-**Inferencia:** batching pertenece al transport plane, mientras sequence pertenece al consistency plane.
+### Messages V2
 
-## 11. Session model sync
+`SessionV2.messages()` pagina por `SessionMessageTable.seq`, derivado del durable event sequence.
 
-Las branches `session-model-sync` y equivalentes forman parte de la familia que propaga cambios de selección/model metadata entre backend y consumidores. En el schema actual existen eventos durables como `ModelSwitched` y `AgentSwitched`, asociados a Session/message.
+### Event history
 
-**Hecho confirmado:** model/agent selection es observable como cambio de Session history, no sólo variable local de UI.
+`SessionV2.history()` / `EventV2.readAggregate()` ordenan por aggregate `seq` ascendente después del cursor `after`.
 
-## 12. Estado efímero del cliente
+### Live chunks
 
-No todo lo visible debe sincronizarse desde backend. `session-prompt-drafts` mantiene drafts localmente por Session.
+El stream live conserva el orden de entrega durante una conexión, pero sus deltas no son necesariamente durable/replayable.
 
-Esto marca una frontera práctica:
+Por tanto, no existe un “orden por ID” ni un “orden por updated time” universal.
 
-### Backend/durable o compartible
+## 4. Global event stream
 
-- Session metadata;
-- messages/history;
-- step/tool outcomes;
-- agent/model switches;
-- admitted prompts/moves;
-- event sequence.
+`packages/server/src/handlers/event.ts` ofrece SSE global:
 
-### Cliente efímero
+- queue bounded 256;
+- `server.connected` inicial;
+- heartbeat 15 s;
+- stream de `EventV2.allBounded()`.
 
-- draft aún no enviado;
-- transient presentation rows;
+Es una superficie live/publicada y no debe confundirse con history durable de una Session concreta.
+
+## 5. Session history y event stream durable
+
+`packages/server/src/handlers/session.ts` expone handlers V2 para:
+
+- `session.history`: página de durable events con `after`/`limit` y `hasMore`;
+- `session.events`: stream de eventos de la Session después de `after`.
+
+Internamente `SessionV2.history()` usa `EventV2.readAggregate()` y `SessionV2.events()` usa `EventV2.durable(...)` filtrado por `SessionEvent.Durable`.
+
+Esto proporciona una surface explícita de replay/follow por aggregate sequence.
+
+## 6. Published no implica durable
+
+Algunos eventos/deltas existen para progreso live y no reaparecen como entradas equivalentes en history. Los boundaries terminales/durable permiten reconstruir estado final sin exigir haber observado cada chunk.
+
+Un reconnect correcto no debe depender de que el cliente haya recibido todos los deltas previos.
+
+## 7. EventV2Bridge
+
+`packages/opencode/src/event-v2-bridge.ts` adapta EventV2 al `GlobalBus` usado por consumers legacy-compatible.
+
+Para cada evento emite una notificación normal. Si el evento es durable, emite además:
+
+```text
+{
+  type: "sync",
+  syncEvent: {
+    id,
+    type: versionedType(...),
+    seq,
+    aggregateID,
+    data
+  }
+}
+```
+
+Esto permite propagar facts durable sin exigir que todos los consumidores internos migren simultáneamente a la API Core.
+
+## 8. SDK/protocol
+
+Los groups de protocol y handlers server convierten estas surfaces en contratos consumibles por clientes generados. Los cambios de schema/version de eventos pueden por tanto afectar al SDK.
+
+Branches como `protocol-events`, `published-events` y `session-event-stream` son evidencia evolutiva, pero el contrato vigente debe leerse siempre del source `dev`.
+
+## 9. Reconnect: patrón seguro
+
+La arquitectura soporta un patrón conceptual:
+
+```text
+1. leer snapshot/proyección actual
+2. conocer un boundary durable/cursor
+3. leer history posterior si hace falta
+4. seguir stream live/durable
+5. deduplicar/aplicar según identidad y sequence
+```
+
+La API concreta puede encapsular parte de estos pasos. No se afirma que todos los clientes implementen exactamente este algoritmo.
+
+## 10. Duplicate delivery y divergencia
+
+EventV2 proporciona idempotencia estricta para replay durable en el store: mismo `(aggregate, seq)` sólo puede representar el mismo id/type/data.
+
+Eso protege el historial persistido, pero un cliente que consuma streams publicados todavía debe diseñar sus propios reducers/dedup de forma adecuada; la garantía del storage no convierte automáticamente cualquier transport consumer en idempotente.
+
+## 11. Estado que no debe sincronizarse como dominio durable
+
+Ejemplos de estado local/transitorio:
+
+- draft aún no admitido;
 - scroll/layout/picker/tab state;
-- ciertos streaming deltas una vez consolidado su `Ended` durable.
+- ciertos deltas una vez consolidado el boundary final;
+- estado runtime como busy/retry/idle cuando no existe como fact durable equivalente.
 
-## 13. Consistencia y duplicate delivery
+Esto debe distinguirse de Session metadata, mensajes, durable events, model/agent switches, prompt admission y outcomes de steps/tools.
 
-El event layer durable tiene semántica idempotente por ID/type/data/seq. Esto permite que capas de sync/replay reintenten sin aceptar silenciosamente una historia distinta.
-
-**Inferencia:** la idempotencia durable reduce el impacto de duplicate delivery de transport, pero el cliente sigue necesitando handlers idempotentes o dedup cuando recibe superficies publicadas.
-
-## 14. Arquitectura de sincronización reconstruida
+## Arquitectura resumida
 
 ```text
-                 +----------------------+
-                 | SQLite projections   |
-                 | SessionStore         |
-                 +----------+-----------+
-                            |
-                       bootstrap/read
-                            |
-                            v
-+-------------+       +-----+------+       +----------------+
-| Event log   |------>| backend /  |------>| SDK / clients  |
-| aggregate   |       | protocol   |       | TUI/Desktop    |
-| seq         |       +-----+------+       +----------------+
-+------+------+             |
-       |                     | published/live
-       | replay/history      v
-       +---------------> event stream
+SQLite projections ---------> bootstrap/read
+       ^                            |
+       |                            v
+Durable EventV2 <------ Session API / protocol ------> clients
+       |                            |
+       | history + session stream   | global/live SSE
+       +----------------------------+
 
-V2 bridge -> legacy Bus consumers durante migración
+EventV2Bridge -> GlobalBus consumers legacy-compatible
 ```
 
-## 15. Conclusiones
+## Invariantes confirmados
 
-### Confirmadas
+1. read models y event surfaces coexisten;
+2. `SessionV2.list()` y legacy list no comparten necesariamente sort key;
+3. messages/history V2 usan sequence como ordering durable;
+4. global SSE y Session durable stream son superficies diferentes;
+5. published/live no equivale a durable/replayable;
+6. EventV2Bridge propaga durable metadata hacia el bus de compatibilidad;
+7. SDK/protocol es parte del boundary de sync, no sólo la UI.
 
-- existen read models y event surfaces simultáneamente;
-- Session stream tiene ordering explícito;
-- protocolo define una superficie de eventos compartida;
-- published no implica durable;
-- SDK se regenera cuando cambia el contrato de eventos;
-- existe bridge de compatibilidad V2/legacy;
-- drafts pueden permanecer client-only.
+## Referencias
 
-### Inferencias
-
-- la estrategia de sync es bootstrap por proyección + incremental events, no replay total obligatorio;
-- durable full-value boundaries permiten recuperarse tras perder deltas live;
-- `seq` es la pieza principal de consistency ordering, mientras transport, batching y UI pueden usar otras unidades.
+- `packages/core/src/session.ts`
+- `packages/core/src/session/store.ts`
+- `packages/core/src/event.ts`
+- `packages/opencode/src/session/session.ts`
+- `packages/opencode/src/event-v2-bridge.ts`
+- `packages/server/src/handlers/event.ts`
+- `packages/server/src/handlers/session.ts`
