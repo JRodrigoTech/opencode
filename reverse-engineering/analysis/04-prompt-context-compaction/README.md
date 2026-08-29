@@ -1,85 +1,112 @@
 # 04 — Prompt, contexto y compaction
 
-## Alcance
+## Alcance y regla de lectura
 
-Este análisis reconstruye la evolución del subsistema que decide **qué información recibe el modelo, con qué rol, durante cuánto tiempo y cómo se recupera cuando la ventana de contexto se agota**. La referencia normativa es `dev`; las demás branches se tratan como evidencia arqueológica de diseños anteriores, experimentos o líneas todavía no integradas.
+Este análisis reconstruye cómo OpenCode prepara el contexto del modelo y cómo reduce historia cuando se aproxima al límite de contexto.
 
-Se analizaron las familias `prompt-*`, `context-*`, `compaction-*`, `instruction-*`, `system-context`, `namespace-instructions`, `read-instruction-*`, además de ramas relacionadas con overflow, summaries, prompt materialization y límites de contexto.
+La baseline es `dev@dc4449df0d52199704ea4989a5a993ebbc605612`.
 
-## Convenciones de evidencia
+### Corrección de auditoría
 
-- **CONFIRMADO EN `dev`**: comportamiento observado directamente en el código vigente de `dev`.
-- **CONFIRMADO EN BRANCH**: comportamiento demostrado por código/commit de una branch, sin asumir que siga vigente.
-- **NO VIGENTE / EXPERIMENTO**: diseño de branch que difiere materialmente de `dev`.
-- **INFERENCIA**: conclusión arquitectónica apoyada por varias evidencias pero no expresada como contrato explícito.
+En `dev` **coexisten dos pipelines distintos** y no deben describirse como si fueran uno solo:
 
-## Resultado principal
+1. **Pipeline de producto actualmente compuesto por `packages/opencode`**: `SessionPrompt` + `SystemPrompt` + `Instruction` + `MessageV2` + `SessionCompaction` + `SessionProcessor` + `LLM`.
+2. **Pipeline V2/Core implementado en `packages/core`**: `SessionRunner` + `SystemContext` + `SessionContextEpoch` + `SessionHistory` + compaction V2 + `@opencode-ai/llm`.
 
-**CONFIRMADO EN `dev`: OpenCode ya no tiene un único “system prompt” estático.** El request al LLM se construye como la combinación ordenada de:
+La existencia del segundo en `dev` demuestra una arquitectura V2 real, pero **no demuestra que haya sustituido al primero como path por defecto del producto**. El composition root de `packages/opencode/src/server/routes/instance/httpapi/server.ts` sigue incluyendo `SessionPrompt`, `SessionCompaction`, `SessionProcessor` y `LLM`.
 
-1. `agent.info.system` del agente seleccionado.
-2. Un **baseline persistente de contexto privilegiado**, producido por `SystemContext` y administrado por `SessionContextEpoch`.
-3. El historial canónico posterior al baseline/última compaction, donde pueden aparecer updates `system` cronológicos.
-4. Un checkpoint de compaction, cuando existe, convertido deliberadamente en mensaje `user` y marcado como **contexto histórico, no instrucciones nuevas**.
-5. Mensajes de usuario, assistant, tool calls/results, shell y attachments materializados.
+Esta distinción corrige una versión anterior de esta documentación que etiquetaba varias propiedades exclusivas del runner V2 como “el runtime actual” sin matiz.
 
-El modelo mental más útil es el siguiente:
+## Pipeline de producto: `packages/opencode`
 
-```mermaid
-flowchart TD
-  A[Input admitido/materializado] --> B[Seleccionar agente]
-  B --> C[Cargar fuentes SystemContext]
-  C --> D[SessionContextEpoch initialize/prepare]
-  D --> E[baseline + snapshot + system updates]
-  E --> F[Cargar historial posterior a baseline/compaction]
-  F --> G[Resolver modelo y tools]
-  G --> H[request.system = agent.system + epoch baseline]
-  H --> I[request.messages = historial proyectado]
-  I --> J{¿Cabe con reserva?}
-  J -- no --> K[Compaction]
-  K --> F
-  J -- sí --> L[LLM stream]
-  L --> M{context-overflow antes de salida?}
-  M -- sí --> N[Compaction forzada]
-  N --> O[Reconstruir request y reintentar una vez]
-```
+El loop efectivo de `packages/opencode/src/session/prompt.ts`:
 
-## Arquitectura vigente resumida
+1. carga el historial mediante `MessageV2.filterCompactedEffect()`;
+2. determina el último usuario/modelo/agente;
+3. materializa tools;
+4. obtiene en paralelo:
+   - `SystemPrompt.skills(agent)`;
+   - `SystemPrompt.environment(model)`;
+   - `Instruction.system()`;
+   - `SystemPrompt.mcp(agent, session.permission)`;
+   - `MessageV2.toModelMessagesEffect(...)`;
+5. entrega `system`, mensajes, tools, modelo y permisos a `SessionProcessor`;
+6. el processor consume el stream de `LLM.Service`;
+7. si el resultado exige compaction, crea una compaction con `packages/opencode/src/session/compaction.ts` y continúa el loop.
 
-### System context y contexto de proyecto
+`Instruction.Service` está por tanto **vigente y cableado**. Resuelve `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md` deprecated, instrucciones configuradas y URLs; además resuelve instrucciones path-local durante lecturas evitando duplicados.
 
-`packages/core/src/system-context/index.ts` define fuentes tipadas, refrescables e independientes. Cada fuente conoce cómo producir su `baseline`, cómo describir un `update` y, opcionalmente, cómo expresar su eliminación. Un valor `unavailable` significa fallo transitorio de observación y **no** eliminación de una instrucción previamente admitida.
+`SystemPrompt.Service` también está vigente: construye contexto de entorno, catálogo de skills e instrucciones MCP, mientras otras capas añaden prompts/provider transforms.
 
-`packages/core/src/system-context/builtins.ts` aporta, entre otros datos, working directory, workspace root, estado Git, plataforma y fecha actual. `packages/core/src/instruction-context.ts` aporta las instrucciones ambientales `AGENTS.md`.
+## Pipeline V2/Core
 
-### Context epoch / checkpoint de creencias
+`packages/core/src/session/runner/llm.ts` implementa otra arquitectura:
 
-`packages/core/src/session/context-epoch.ts` persiste por sesión un baseline, un snapshot codificado por fuente y la secuencia a la que corresponde. El snapshot representa el contexto privilegiado que el modelo ya conoce, no simplemente el estado actual del filesystem. Las diferencias posteriores se narran como mensajes `system` cronológicos. Una compaction completada crea una frontera en la que el sistema puede sustituir/rebaselinar el contexto.
+- `SystemContextRegistry` combina fuentes de contexto;
+- `SessionContextEpoch` mantiene baseline/snapshot por sesión;
+- `SessionHistory.entriesForRunner()` selecciona la historia desde la frontera apropiada;
+- `toLLMMessages()` proyecta mensajes V2;
+- `SessionCompaction` puede compactar antes del turno y recuperar un overflow previo a salida assistant;
+- `LLMClient` ejecuta el request portable.
 
-Esta arquitectura es la evolución directa de las ideas exploradas en `context-checkpoint`, `system-context` y `feat/core-v2-session-context-epoch`.
+En ese pipeline, `request.system` combina `agent.info?.system` con `system.baseline`, y los cambios posteriores de contexto pueden aparecer como mensajes `system` ordenados en la historia.
 
-### Compaction y continuidad
+Esto es **comportamiento confirmado del runner V2 presente en `dev`**, no una descripción universal del `SessionPrompt` legacy-compatible.
 
-`packages/core/src/session/compaction.ts` resume el tramo antiguo del historial y conserva una cola reciente. El resumen se estructura en objetivo, detalles importantes, estado de trabajo, siguiente movimiento y archivos relevantes. El resumen anterior se mezcla con contexto más reciente para conservar decisiones y restricciones.
+## Compaction: dos implementaciones
 
-`packages/core/src/session/runner/to-llm-message.ts` convierte la compaction en un mensaje `user` dentro de `<conversation-checkpoint>`, con una advertencia explícita para tratarlo como historia y **no como nuevas instrucciones**. Esta separación es una defensa de precedencia: las instrucciones privilegiadas siguen en system context; el resumen conserva memoria conversacional.
+### Path `packages/opencode`
 
-### Overflow y retry
+`packages/opencode/src/session/compaction.ts` es la compaction utilizada por `SessionPrompt`.
 
-El runner intenta compaction proactiva antes de inferir cuando el request estimado supera `context - max(outputBudget, buffer)`. Si el proveedor devuelve `context-overflow` **antes de que haya empezado salida assistant**, intenta compaction reactiva y reconstruye el request. Esa recuperación consume una sola oportunidad; no se crea un bucle de retries.
+Hechos relevantes:
 
-La semántica aparece históricamente en `feat/core-v2-overflow-recovery` y permanece, con otra estructura, en `dev`.
+- usa el agente `compaction`;
+- selecciona una cola reciente por turns;
+- el presupuesto reciente por defecto es aproximadamente el 25 % del contexto utilizable, limitado entre 2.000 y 15.000 tokens, salvo configuración;
+- trunca resultados de tools a 2.000 caracteres al construir el material de resumen;
+- reutiliza `buildPrompt()` del core, pero conserva lifecycle, mensajes y processor del path legacy-compatible;
+- puede podar outputs antiguos de tools (`PRUNE_MINIMUM=20_000`, `PRUNE_PROTECT=40_000`).
+
+### Path V2/Core
+
+`packages/core/src/session/compaction.ts` implementa la política V2. Sus defaults y su representación durable no deben trasladarse automáticamente al path anterior.
+
+Entre sus propiedades están el checkpoint V2, una cola reciente explícita y el recovery acotado de overflow integrado con `SessionRunner`.
+
+## Overflow
+
+También hay dos políticas.
+
+En el path `packages/opencode`, `packages/opencode/src/session/overflow.ts` calcula el contexto utilizable a partir de `model.limit.*`, `compaction.reserved` y el output máximo; si `compaction.auto === false` no dispara auto-compaction. El loop legacy decide compactar a partir del usage/resultado procesado.
+
+En el runner V2, la compaction puede ejecutarse proactivamente sobre el request ensamblado y existe además recovery reactivo de `context-overflow` **sólo antes de que haya empezado salida assistant**, con un único reintento tras reconstruir el request.
+
+No es correcto atribuir ese recovery V2 al `SessionPrompt` por defecto sin especificar el pipeline.
 
 ## Documentos
 
-- [`01-system-context/README.md`](01-system-context/README.md): construcción del system prompt, fuentes, context epoch y updates.
-- [`02-instructions/README.md`](02-instructions/README.md): `AGENTS.md`, instrucciones heredadas/dinámicas y evolución de discovery.
-- [`03-compaction/README.md`](03-compaction/README.md): algoritmo vigente y familias experimentales de compaction.
-- [`04-overflow-limits-retry/README.md`](04-overflow-limits-retry/README.md): límites, reservas, overflow y retry.
-- [`05-prompt-pipeline-continuity/README.md`](05-prompt-pipeline-continuity/README.md): materialización, metadata, historial y continuidad entre turns.
-- [`06-branch-inventory/README.md`](06-branch-inventory/README.md): inventario y clasificación de branches del alcance.
+- [`01-system-context/README.md`](01-system-context/README.md): `SystemContext`/`SessionContextEpoch` y su relación con el pipeline V2, contrastados con el path activo de `packages/opencode`.
+- [`02-instructions/README.md`](02-instructions/README.md): discovery de instrucciones vigente y arquitectura V2 de instruction context.
+- [`03-compaction/README.md`](03-compaction/README.md): las dos implementaciones de compaction y sus diferencias.
+- [`04-overflow-limits-retry/README.md`](04-overflow-limits-retry/README.md): overflow legacy-compatible frente a recovery V2.
+- [`05-prompt-pipeline-continuity/README.md`](05-prompt-pipeline-continuity/README.md): ambos pipelines de construcción/continuidad.
+- [`06-branch-inventory/README.md`](06-branch-inventory/README.md): inventario histórico de branches.
 
 ## Referencias primarias de `dev`
+
+### Path de producto
+
+- `packages/opencode/src/session/prompt.ts`
+- `packages/opencode/src/session/system.ts`
+- `packages/opencode/src/session/instruction.ts`
+- `packages/opencode/src/session/compaction.ts`
+- `packages/opencode/src/session/overflow.ts`
+- `packages/opencode/src/session/processor.ts`
+- `packages/opencode/src/session/llm.ts`
+- `packages/opencode/src/server/routes/instance/httpapi/server.ts`
+
+### Path V2/Core
 
 - `packages/core/src/session/runner/llm.ts`
 - `packages/core/src/session/runner/to-llm-message.ts`
@@ -87,18 +114,8 @@ La semántica aparece históricamente en `feat/core-v2-overflow-recovery` y perm
 - `packages/core/src/session/compaction.ts`
 - `packages/core/src/session/context-epoch.ts`
 - `packages/core/src/system-context/index.ts`
-- `packages/core/src/system-context/builtins.ts`
 - `packages/core/src/instruction-context.ts`
-- `packages/core/src/agent.ts`
 
-## Conclusión arquitectónica
+## Conclusión
 
-**INFERENCIA, confianza alta:** la evolución observada va desde “reconstruir y concatenar prompts/instrucciones en cada turno” hacia un modelo de **estado contextual durable**. En ese modelo, OpenCode conserva por separado:
-
-- autoridad/instrucciones privilegiadas;
-- creencias del modelo sobre fuentes dinámicas;
-- historia conversacional reducible;
-- cola reciente exacta;
-- metadata/proveedor necesaria para continuidad técnica.
-
-Esto reduce dos fallos clásicos en agentes largos: reinyectar instrucciones obsoletas como si fueran actuales y convertir un resumen histórico en una nueva instrucción de máxima prioridad.
+La verdad arquitectónica de `dev` es **híbrida**. OpenCode no puede documentarse correctamente diciendo simplemente “usa SessionPrompt” ni diciendo “ya usa ContextEpoch para todo”. El primero sigue siendo un runtime de producto cableado; el segundo es una arquitectura V2 sustancial presente en Core y utilizada por superficies V2. Cualquier afirmación sobre contexto, compaction u overflow debe indicar a cuál de los dos pipelines se refiere.
