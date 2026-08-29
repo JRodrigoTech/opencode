@@ -2,7 +2,7 @@
 
 Create each RULE as a minimal, deterministic operational specification for an LLM.
 
-Rules:
+## Rules:
 
 - Each RULE MUST govern one behavior, constraint, or decision domain
 - Use the title format `# RULE: <Name>`
@@ -23,29 +23,29 @@ Rules:
 - The RULE SHOULD remain independently understandable
 - Remove any text that does not change how the LLM behaves or decides
 
-Preferred structure:
+## Preferred structure:
 
 ```text
 # RULE: <Name>
 
 <Primary instruction>
 
-Rules:
+## Rules:
 
 - <requirement>
 - <constraint>
 - <exception>
 
-Examples:
+## Examples:
 
 - <example>
 
-Priority:
+## Priority:
 
 - <principle A> > <principle B>
 ```
 
-Priority:
+## Priority:
 
 - internal consistency > instruction quantity
 - deterministic behavior > explanatory prose
