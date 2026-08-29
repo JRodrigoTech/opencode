@@ -1,0 +1,265 @@
+name: Reverse engineering branch inventory
+
+on:
+  push:
+    branches:
+      - reverse-engineering
+    paths:
+      - .github/workflows/reverse-engineering-branches.yml
+
+permissions:
+  contents: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout all history
+        uses: actions/checkout@v4
+        with:
+          ref: reverse-engineering
+          fetch-depth: 0
+
+      - name: Fetch every branch
+        run: |
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: Generate branch reverse-engineering report
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections
+          import datetime as dt
+          import hashlib
+          import os
+          import re
+          import subprocess
+
+          REPO = "JRodrigoTech/opencode"
+          BASE = "origin/dev"
+          OUT = "reverse-engineering/BRANCHES.md"
+
+          def git(*args, check=True):
+              p = subprocess.run(["git", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+              if check and p.returncode != 0:
+                  raise RuntimeError(f"git {' '.join(args)}: {p.stderr.strip()}")
+              return p.stdout.strip()
+
+          def anchor(name):
+              slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "branch"
+              return f"branch-{slug}-{hashlib.sha1(name.encode()).hexdigest()[:8]}"
+
+          def relation(status, ahead, behind):
+              if status == "identical":
+                  return "apunta al mismo contenido que `dev`"
+              if status == "behind":
+                  return f"es ancestro/contenido histórico de `dev`; no tiene commits exclusivos y está {behind} commit(s) por detrás"
+              if status == "ahead":
+                  return f"contiene {ahead} commit(s) exclusivos que todavía no están en `dev` y no está por detrás"
+              return f"ha divergido de `dev`: {ahead} commit(s) exclusivos en la branch y {behind} commit(s) exclusivos en `dev`"
+
+          def branch_kind(name):
+              low = name.lower()
+              if name == "dev": return "main/default branch"
+              if name == "reverse-engineering": return "documentación de reverse engineering"
+              if name in {"production", "productionclear"}: return "release/production"
+              if name == "beta": return "integración beta / prerelease"
+              if name in {"2.0", "v2", "opencode-2-0"}: return "línea histórica de arquitectura v2/2.0"
+              prefixes = [
+                  ("fix/", "bugfix"), ("fix-", "bugfix"), ("feat/", "feature"), ("feature/", "feature"),
+                  ("refactor/", "refactor"), ("cleanup/", "cleanup"), ("chore/", "chore/maintenance"),
+                  ("test/", "tests"), ("perf/", "performance"), ("docs", "documentation"),
+                  ("repro/", "reproducer/debugging"), ("debug-", "debugging"), ("investigate-", "investigation"),
+                  ("remove-", "removal/cleanup"), ("migrate-", "migration"), ("migration-", "migration"),
+                  ("worktree-", "worktree experiment/maintenance"), ("layer-node-", "node-layer decomposition"),
+                  ("effect/", "Effect refactor/experiment"), ("kit/", "implementation spike/refactor"),
+                  ("nxl/", "developer feature/fix branch"), ("claude/", "agent-generated investigation/change"),
+                  ("copilot/", "Copilot-generated change/investigation"), ("opencode/", "OpenCode-generated feature/fix branch"),
+                  ("pr-", "PR support/assets/reproduction"), ("oc-", "historical OpenCode release/fix"),
+              ]
+              for prefix, kind in prefixes:
+                  if low.startswith(prefix): return kind
+              if "repro" in low: return "reproducer/debugging"
+              if "fix" in low: return "bugfix"
+              if "test" in low or "flake" in low: return "tests/stability"
+              if "audit" in low or "review" in low: return "audit/review"
+              if "cleanup" in low or "clean-" in low: return "cleanup"
+              if "migrate" in low: return "migration"
+              return "feature/experiment"
+
+          DOMAINS = [
+              ("mcp", "MCP"), ("tui", "TUI"), ("desktop", "desktop app"), ("browser", "browser tooling"),
+              ("sdk", "SDK/API"), ("provider", "provider layer"), ("anthropic", "Anthropic"), ("openai", "OpenAI"),
+              ("azure", "Azure"), ("bedrock", "AWS Bedrock"), ("vertex", "Google Vertex"), ("gemini", "Gemini"),
+              ("xai", "xAI"), ("deepseek", "DeepSeek"), ("model", "model catalog/selection"), ("session", "sessions"),
+              ("prompt", "prompt pipeline"), ("tool", "tool execution"), ("permission", "permissions"),
+              ("compaction", "context compaction"), ("context", "context management"), ("workspace", "workspaces"),
+              ("worktree", "git worktrees"), ("shell", "shell/terminal"), ("pty", "PTY/terminal"),
+              ("config", "configuration"), ("plugin", "plugins"), ("auth", "authentication/OAuth"),
+              ("oauth", "OAuth"), ("server", "server/backend"), ("service", "service/daemon"),
+              ("websocket", "WebSocket transport"), ("httpapi", "HTTP API"), ("effect", "Effect migration/runtime"),
+              ("llm", "LLM abstraction"), ("ai-", "AI/provider stack"), ("native", "native runtime/provider stack"),
+              ("cache", "caching"), ("state", "state management"), ("storage", "storage"), ("sqlite", "SQLite"),
+              ("git", "Git/VCS"), ("vcs", "VCS"), ("file", "filesystem/files"), ("search", "search"),
+              ("image", "images/media"), ("media", "media attachments"), ("notification", "notifications"),
+              ("tab", "tabs/navigation"), ("timeline", "timeline/session UI"), ("composer", "composer/input UI"),
+              ("dialog", "dialogs/UI"), ("theme", "themes/design system"), ("mobile", "mobile UI"),
+              ("console", "console/web account app"), ("go-", "OpenCode Go/billing experience"),
+              ("billing", "billing"), ("stripe", "Stripe/billing"), ("ci", "CI"), ("release", "release tooling"),
+          ]
+
+          def domain(name, subjects, scopes):
+              hay = " ".join([name, *subjects, *scopes]).lower()
+              found=[]
+              for needle, label in DOMAINS:
+                  if needle in hay and label not in found:
+                      found.append(label)
+                  if len(found) == 3:
+                      break
+              return ", ".join(found) if found else "área indicada por el nombre y los commits"
+
+          refs_raw = git("for-each-ref", "--format=%(refname:short)", "refs/remotes/origin")
+          refs=[]
+          for ref in refs_raw.splitlines():
+              if ref in {"origin", "origin/HEAD"}: continue
+              if not ref.startswith("origin/"): continue
+              refs.append((ref[len("origin/"):], ref))
+          refs.sort(key=lambda x: x[0].lower())
+
+          entries=[]
+          for idx, (name, ref) in enumerate(refs, 1):
+              counts = git("rev-list", "--left-right", "--count", f"{BASE}...{ref}").split()
+              behind, ahead = (int(counts[0]), int(counts[1]))
+              if ahead == 0 and behind == 0: status = "identical"
+              elif ahead == 0: status = "behind"
+              elif behind == 0: status = "ahead"
+              else: status = "diverged"
+
+              tip = git("log", "-1", "--format=%H%x1f%aI%x1f%s", ref).split("\x1f", 2)
+              tip_sha, tip_date, tip_subject = tip if len(tip) == 3 else (git("rev-parse", ref), "", "")
+              mb = git("merge-base", BASE, ref, check=False)
+
+              subjects=[]
+              if ahead:
+                  raw = git("log", "--no-merges", "--format=%s", "--max-count=5", f"{BASE}..{ref}", check=False)
+                  subjects=[x.strip() for x in raw.splitlines() if x.strip()]
+                  if not subjects:
+                      raw = git("log", "--format=%s", "--max-count=5", f"{BASE}..{ref}", check=False)
+                      subjects=[x.strip() for x in raw.splitlines() if x.strip()]
+
+              files=[]
+              if ahead and mb:
+                  raw = git("diff", "--name-only", f"{mb}..{ref}", check=False)
+                  files=[x for x in raw.splitlines() if x]
+              elif name == "dev":
+                  files=[]
+
+              scope_counts=collections.Counter()
+              for p in files:
+                  parts=p.split("/")
+                  scope="/".join(parts[:2]) if len(parts) > 1 else parts[0]
+                  scope_counts[scope]+=1
+              scopes=[s for s,_ in scope_counts.most_common(5)]
+
+              kind=branch_kind(name)
+              dom=domain(name, subjects or [tip_subject], scopes)
+              if name == "dev":
+                  purpose="Rama principal de desarrollo y baseline de este estudio. Todas las comparaciones funcionales y de historia se realizan contra `dev`."
+              elif name == "reverse-engineering":
+                  purpose="Rama dedicada a esta documentación de ingeniería inversa; no forma parte del desarrollo funcional upstream de OpenCode."
+              else:
+                  topic=re.sub(r"[/_-]+", " ", name).strip()
+                  purpose=f"Rama de **{kind}** centrada en **{dom}** (`{topic}`)."
+                  if subjects:
+                      purpose += f" Los commits exclusivos apuntan a: “{subjects[0]}”."
+                  elif tip_subject:
+                      purpose += f" Su tip histórico es: “{tip_subject}”."
+                  purpose += f" Frente a `dev`, {relation(status, ahead, behind)}."
+
+              evidence = "alta: genealogía Git + commits exclusivos + diff" if ahead else "media-alta: genealogía Git + tip histórico; sin commits exclusivos frente a dev"
+              entries.append(dict(name=name, ref=ref, ahead=ahead, behind=behind, status=status, sha=tip_sha,
+                                  date=tip_date, tip=tip_subject, merge_base=mb, subjects=subjects, files=files,
+                                  scopes=scopes, kind=kind, domain=dom, purpose=purpose, evidence=evidence, anchor=anchor(name)))
+              if idx % 100 == 0:
+                  print(f"Analyzed {idx}/{len(refs)} branches")
+
+          status_es={"identical":"idéntica", "behind":"contenida/por detrás", "ahead":"por delante", "diverged":"divergida"}
+          now=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+          lines=[]
+          lines += [
+              "# Inventario y análisis de branches",
+              "",
+              "> Documento de reverse engineering generado a partir de la historia Git completa del repositorio.",
+              "",
+              "## Alcance y metodología",
+              "",
+              f"- Repositorio: `{REPO}`.",
+              "- Baseline: `dev` (default/main branch del repositorio).",
+              f"- Fecha de extracción UTC: `{now}`.",
+              f"- Branches remotas analizadas: **{len(entries)}**.",
+              "- Para cada branch se calcula `ahead/behind` mediante `git rev-list --left-right --count dev...branch`, `merge-base`, tip commit, hasta cinco commits exclusivos y scopes modificados desde el merge-base.",
+              "- **Importante:** el propósito funcional se reconstruye con evidencia Git. Cuando una rama ya está completamente contenida en `dev`, no existen commits exclusivos que inspeccionar; en esos casos se combina genealogía, tip histórico y naming. Por eso se conserva un campo de nivel de evidencia.",
+              "",
+              "## Lectura de estados respecto a `dev`",
+              "",
+              "| Estado | Significado |",
+              "|---|---|",
+              "| `idéntica` | Mismo commit/contenido que `dev`. |",
+              "| `contenida/por detrás` | La branch no tiene commits exclusivos; su trabajo está contenido en `dev` y/o quedó como referencia histórica. |",
+              "| `por delante` | La branch contiene commits que `dev` todavía no contiene y no se ha separado por cambios exclusivos de `dev`. |",
+              "| `divergida` | Tanto `dev` como la branch contienen commits exclusivos desde su merge-base. |",
+              "",
+              "## Tabla de branches",
+              "",
+              "| Branch | Estado vs `dev` | Ahead | Behind | Función resumida | Detalle |",
+              "|---|---:|---:|---:|---|---|",
+          ]
+          for e in entries:
+              short = e["purpose"].replace("\n", " ")
+              if len(short) > 180: short=short[:177]+"…"
+              lines.append(f"| `{e['name']}` | {status_es[e['status']]} | {e['ahead']} | {e['behind']} | {short} | [ver](#{e['anchor']}) |")
+
+          lines += ["", "## Análisis branch por branch", ""]
+          for e in entries:
+              lines += [
+                  f"<a id=\"{e['anchor']}\"></a>",
+                  f"### `{e['name']}`",
+                  "",
+                  e["purpose"],
+                  "",
+                  f"**Relación con `dev`:** {status_es[e['status']]} — `ahead={e['ahead']}`, `behind={e['behind']}`. " + relation(e['status'], e['ahead'], e['behind']).capitalize() + ".",
+                  "",
+                  f"**Tip:** `{e['sha'][:12]}` ({e['date'] or 'fecha no disponible'}) — {e['tip'] or 'sin subject disponible'}.",
+                  "",
+              ]
+              if e["merge_base"]:
+                  lines += [f"**Merge-base con `dev`:** `{e['merge_base'][:12]}`.", ""]
+              if e["subjects"]:
+                  lines += ["**Commits exclusivos representativos:**"]
+                  for s in e["subjects"]:
+                      lines.append(f"- {s}")
+                  lines.append("")
+              if e["scopes"]:
+                  lines += ["**Scopes/paths predominantes del diff desde el merge-base:** " + ", ".join(f"`{s}`" for s in e["scopes"]) + ".", ""]
+              if e["files"]:
+                  lines += [f"**Superficie del diff:** {len(e['files'])} archivo(s) detectados desde el merge-base.", ""]
+              lines += [f"**Nivel de evidencia:** {e['evidence']}.", "", "---", ""]
+
+          os.makedirs(os.path.dirname(OUT), exist_ok=True)
+          with open(OUT, "w", encoding="utf-8") as f:
+              f.write("\n".join(lines).rstrip()+"\n")
+          print(f"Wrote {OUT}: {os.path.getsize(OUT)} bytes, {len(entries)} branches")
+          PY
+
+      - name: Commit generated report
+        run: |
+          if git diff --quiet -- reverse-engineering/BRANCHES.md; then
+            echo "No report changes"
+            exit 0
+          fi
+          git config user.name "opencode-reverse-engineering[bot]"
+          git config user.email "opencode-reverse-engineering[bot]@users.noreply.github.com"
+          git add reverse-engineering/BRANCHES.md
+          git commit -m "docs(reverse-engineering): catalog and analyze all branches"
+          git push origin HEAD:reverse-engineering
