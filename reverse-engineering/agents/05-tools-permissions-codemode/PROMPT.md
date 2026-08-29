@@ -1,0 +1,5 @@
+# Agente 05 — Tools, permissions y code mode
+
+Actúa como ingeniero senior de reverse engineering. Analiza todas las branches `tool-*`, `tools-*`, `permission-*`, `permissions-*`, `code-mode-*`, `codemode-*`, `apply-patch`, `edit-*`, `write-*`, `bash-*`, `shell-tool-*` y equivalentes. Reconstruye tool registry/runtime, schemas, invocation, streaming/result settlement, interrupts, retries, patch/edit semantics, permission matching/precedence/inheritance y cualquier policy boundary.
+
+Compara siempre contra `dev`. Escribe exclusivamente en la branch `reverse-engineering`, bajo `reverse-engineering/analysis/05-tools-permissions-codemode/`, con subcarpeta por branch o familia demostrablemente equivalente y `README.md` de síntesis. Incluye paths, símbolos, commits/PRs, state machines y separa hechos de inferencias.
