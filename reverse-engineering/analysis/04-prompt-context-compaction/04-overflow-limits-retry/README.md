@@ -1,172 +1,132 @@
 # Context limits, overflow y retry
 
-## Modelo de límites en `dev`
+## Corrección de auditoría
 
-El límite operativo de contexto procede del modelo resuelto:
+`dev` tiene dos políticas de overflow asociadas a sus dos runtimes de sesión. La versión anterior de este documento describía el recovery del runner V2 como si fuese el comportamiento universal de OpenCode. La separación correcta es la siguiente.
 
-```text
-model.route.defaults.limits.context
-```
+---
 
-El presupuesto de output se obtiene, en orden práctico, de:
+## 1. Path de producto: `packages/opencode`
 
-```text
-request.generation.maxTokens
-model.route.defaults.limits.output
-0
-```
+Archivos principales:
 
-`SessionCompaction` no interpreta un número fijo global como context window. Trabaja con los límites de la ruta/modelo que realmente se va a usar.
+- `packages/opencode/src/session/overflow.ts`
+- `packages/opencode/src/session/compaction.ts`
+- `packages/opencode/src/session/prompt.ts`
+- `packages/opencode/src/session/processor.ts`
 
-## Reserva proactiva antes del overflow
+### Contexto utilizable
 
-**CONFIRMADO EN `dev`:** antes de ejecutar el provider turn, el runner entrega a `compactIfNeeded()` el request ya ensamblado. La estimación incluye:
+`usable()` obtiene `model.limit.context`. Si el modelo declara `context === 0`, devuelve 0.
 
-- `request.system`;
-- `request.messages`;
-- `request.tools`.
-
-Se compacta cuando la estimación excede:
+La reserva es:
 
 ```text
-context - max(outputBudget, compaction.buffer)
+cfg.compaction.reserved
+  ?? min(20_000, ProviderTransform.maxOutputTokens(model, outputTokenMax))
 ```
 
-con `compaction.buffer = 20_000` tokens por defecto.
-
-Esto implica que OpenCode no espera necesariamente a que el proveedor rechace el request. Intenta mantener una reserva para:
-
-- el output del modelo;
-- variación/error de estimación;
-- crecimiento durante tool loops/continuations.
-
-### Si el context limit no está disponible
-
-**CONFIRMADO EN `dev`:** la auto-compaction basada en tamaño devuelve `false` si el modelo no declara un `limits.context` positivo. No inventa una ventana.
-
-## El propio summary también debe caber
-
-Antes de enviar un summary request, `compactAfterOverflow()` calcula:
+Si el modelo declara un límite de input separado:
 
 ```text
-summaryOutput = min(outputBudget || 4096, 4096)
+usable = max(0, model.limit.input - reserved)
 ```
 
-y rechaza la operación si el `summaryPrompt` estimado supera:
+si no:
 
 ```text
-context - summaryOutput
+usable = max(0, model.limit.context - maxOutputTokens)
 ```
 
-**CONFIRMADO EN `dev`:** esto evita una recursión absurda en la que la operación destinada a resolver el overflow también desborda la ventana.
+Es importante no confundir el constante `COMPACTION_BUFFER = 20_000` con una resta universal de 20k: por defecto se usa el **mínimo entre 20k y el output máximo calculado** como `reserved` cuando existe `model.limit.input`; en la rama sin input limit se resta directamente el output máximo.
 
-## Overflow reactivo del proveedor
+### Detección de overflow/auto-compaction
 
-Archivo principal: `packages/core/src/session/runner/llm.ts`.
+`isOverflow()` devuelve `false` cuando:
 
-### Detección
+- `cfg.compaction.auto === false`; o
+- `model.limit.context === 0`.
 
-El stream detecta `isContextOverflowFailure(event)` para provider errors. Hay dos casos relevantes:
-
-1. overflow reportado como `ProviderErrorEvent` dentro del stream;
-2. overflow materializado como failure del stream/`LLMError`.
-
-### Condición de seguridad
-
-**CONFIRMADO EN `dev`:** el error sólo se intercepta para recovery si `publisher.hasAssistantStarted()` es falso.
-
-Es decir: si ya comenzó a publicarse respuesta assistant, OpenCode no oculta el fallo para reejecutar el turno desde cero. Esta condición previene duplicar side effects o producir dos respuestas solapadas para una misma entrada.
-
-## Recovery path
-
-Cuando el overflow ocurre antes de salida assistant:
-
-1. se retiene el error en `overflowFailure` en lugar de publicarlo inmediatamente;
-2. termina/se evalúa el provider stream;
-3. se invoca `compactAfterOverflow({ sessionID, entries, model, request })`;
-4. si la compaction termina correctamente, el runner dispara `ContinueAfterOverflowCompaction`;
-5. el turno se reconstruye desde historia persistida compactada;
-6. el nuevo attempt se ejecuta **sin volver a proporcionar la función de overflow recovery**.
-
-El paso 6 es el mecanismo que acota el retry.
-
-## Retry exactamente una vez
-
-**CONFIRMADO EN `dev`:** la arquitectura no implementa `while overflow -> compact -> retry` indefinido. La primera ejecución dispone de `recoverOverflow`; el attempt posterior a la compaction se ejecuta por el camino que ya no vuelve a recuperar otro overflow.
-
-Por tanto la semántica efectiva es:
+El consumo usado para la comparación es:
 
 ```text
-provider attempt
-  -> overflow antes de assistant output
-  -> compact
-  -> rebuild request
-  -> one retry
-  -> si vuelve a fallar, propagar fallo
+tokens.total
+  || input + output + cache.read + cache.write
 ```
 
-## Diferencia entre auto-compaction y overflow recovery
+y se considera overflow cuando:
 
-Son dos triggers distintos:
+```text
+count >= usable(...)
+```
 
-| Trigger | Momento | Requiere `compaction.auto` | Propósito |
-|---|---|---:|---|
-| `compactIfNeeded` | antes del provider call | sí | prevención |
-| `compactAfterOverflow` | después de context-overflow | no depende del gate de auto | recuperación |
+Este cálculo se basa en usage del assistant/modelo y no en la estimación completa de `request.system + messages + tools` utilizada por el runner V2.
 
-**CONFIRMADO EN `dev`:** aunque `compactIfNeeded()` comprueba `config.auto`, `compactAfterOverflow()` no lo hace. Por diseño, desactivar auto-compaction no elimina necesariamente la capacidad de salvar un turno que el proveedor ya rechazó por overflow.
+### Recovery en el loop legacy-compatible
 
-## Branch `feat/core-v2-overflow-recovery`
+`SessionPrompt` y `SessionCompaction` poseen su propio control de continuidad. Cuando el processor solicita compaction, el loop crea el mensaje/part de compaction y continúa desde el historial resultante.
 
-**CONFIRMADO EN BRANCH:** esta rama introduce de manera explícita el patrón de recovery que hoy puede reconocerse en `dev`: capturar overflow previo a salida, compactar y reintentar una vez reconstruyendo el request.
+La implementación de `packages/opencode/src/session/compaction.ts` tiene además una ruta `overflow` capaz de separar/reproducir el último user turn para intentar recuperar una conversación que ya excedió contexto.
 
-**EVOLUCIÓN:** la implementación actual usa `TurnTransitionError` y dos transiciones distintas:
+No debe describirse esta ruta con el mismo contrato de “interceptar `ProviderErrorEvent` antes de output y reintentar exactamente una vez” del runner V2: son implementaciones distintas.
 
-- `ContinueAfterCompaction` para compaction proactiva;
-- `ContinueAfterOverflowCompaction` para la recuperación reactiva.
+---
 
-Esto hace que la política de retry esté codificada en el control flow del runner y no en un retry genérico del provider client.
+## 2. Runner V2/Core
 
-## `context-overflow`
+Archivos principales:
 
-**CONFIRMADO EN BRANCH:** la rama estudia la clasificación/propagación del overflow como una condición semántica distinta de un error de transporte o error genérico del proveedor.
+- `packages/core/src/session/runner/llm.ts`
+- `packages/core/src/session/compaction.ts`
 
-**CONFIRMADO EN `dev`:** esa idea queda formalizada mediante `isContextOverflowFailure()` y el tratamiento especial en el runner.
+### Compaction proactiva
 
-## `prompt-retry` no es este mecanismo
+El runner V2 construye primero un `LLM.request()` portable y entrega request + historia + modelo a `compactIfNeeded()`. Esa implementación puede estimar el request ensamblado y decidir compactar **antes** del provider call.
 
-La branch `prompt-retry` contiene en su punta `fix(tui): retry ambiguous prompt admission` (`d6affc0685e7daca8443a193a4957f0b2153af92`).
+Los límites y reservas concretos pertenecen a la implementación V2/Core y no deben proyectarse al `SessionPrompt` legacy-compatible.
 
-**CONFIRMADO:** se refiere a admission/retry del prompt en la TUI, no al retry de un LLM request tras context overflow. Se incluye en el inventario para evitar una asociación falsa por nombre.
+### Overflow reactivo
 
-## `remove-200k-context` tampoco define la ventana
+Durante el stream V2 se reconoce `isContextOverflowFailure(...)` tanto en provider events como en failures normalizados.
 
-La rama contiene `refactor(opencode): remove legacy 200k pricing` (`96135d70a4cb3fbcbe98d90f40c8762a50d30af3`) y cambios de tiers/pricing.
+El recovery sólo se intenta cuando:
 
-**CONFIRMADO:** el “200k context” de ese nombre está ligado principalmente a contratos de pricing legacy, no al algoritmo actual que decide cuándo compactar. No se usa como evidencia de context limit operativo.
+```text
+publisher.hasAssistantStarted() === false
+```
 
-## Fallos de compaction durante recovery
+Si ya comenzó salida assistant, el error no se oculta para repetir el turno desde cero.
 
-**CONFIRMADO EN `dev`:** `compactAfterOverflow()` puede devolver `false` si:
+### Recovery acotado
 
-- no hay context limit utilizable;
-- no existe historial seleccionable;
-- no hay `head` antiguo y tampoco checkpoint previo que permita progresar;
-- el summary prompt no cabe;
-- el summarizer emite provider error;
-- el stream del summarizer falla;
-- el resultado queda vacío.
+Cuando el primer attempt desborda antes de salida:
 
-En esos casos no se genera la transición de recovery y el overflow original termina siendo publicado/propagado.
+1. se retiene/clasifica el overflow;
+2. se ejecuta `compactAfterOverflow(...)`;
+3. si progresa, se produce `ContinueAfterOverflowCompaction`;
+4. se reconstruye el request desde historia compactada;
+5. el attempt siguiente se ejecuta sin volver a habilitar el mismo recovery.
 
-## Qué no hace este mecanismo
+Por tanto, **en el runner V2** el retry por overflow está acotado a una única reconstrucción/repetición.
 
-- No reduce dinámicamente tools individuales para intentar encajar.
-- No baja automáticamente a otro modelo con ventana mayor.
-- No implementa múltiples niveles de summary recursivo en `dev`.
-- No trata un overflow posterior a salida assistant como retry seguro.
-- No confunde retry por overflow con los retries de transporte/provider, que pertenecen a otra capa.
+Esto es independiente de retries HTTP/transporte del cliente LLM.
+
+---
+
+## 3. Diferencias que deben mantenerse explícitas
+
+| Propiedad | `packages/opencode` | Core V2 |
+|---|---|---|
+| Trigger principal | usage/estado del loop y processor | estimación del request + provider overflow |
+| `compaction.auto=false` | desactiva `isOverflow()` automático | la política depende de la función V2 invocada; recovery reactivo es separado |
+| Representación | mensajes/parts SessionV1 compatibles | Session events/messages V2 |
+| Recovery de overflow | lógica propia en `SessionCompaction.process(... overflow)` | `compactAfterOverflow` + `TurnTransitionError` |
+| Retry “exactamente una vez” | no debe afirmarse como contrato general | sí, para el recovery reactivo V2 descrito |
+
+## 4. Branches históricas
+
+`feat/core-v2-overflow-recovery` es evidencia directa de la semántica que aparece en el **runner V2** actual. `context-overflow` ayuda a reconstruir la clasificación semántica del error. `prompt-retry` se refiere a admission/UI y no debe confundirse con retry LLM por context overflow.
 
 ## Conclusión
 
-**INFERENCIA, confianza alta:** la política está diseñada como una máquina de estados, no como un retry middleware. La compaction cambia durablemente la representación de la sesión; por eso el retry correcto requiere **reconstruir el request desde la nueva historia**, no reenviar el mismo payload. Esta es la razón arquitectónica por la que overflow recovery reside en `SessionRunner` y no exclusivamente en el adapter del proveedor.
+La documentación correcta debe evitar una política de overflow ficticiamente unificada. `dev` mantiene el algoritmo legacy-compatible de `SessionPrompt` y, a la vez, un recovery V2 más explícito basado en request portable, compaction durable y una transición de retry acotada.
