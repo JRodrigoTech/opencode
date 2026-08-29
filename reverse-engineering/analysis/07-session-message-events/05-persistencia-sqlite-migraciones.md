@@ -1,171 +1,160 @@
 # Persistencia, SQLite y migraciones
 
+## Baseline auditada
+
+Contrastado contra `dev@dc4449df0d52199704ea4989a5a993ebbc605612`.
+
 ## 1. Boundary de persistencia
 
-La arquitectura actual usa SQLite como store local transaccional para Sessions, mensajes, eventos y proyecciones. Hay que distinguir:
+OpenCode usa SQLite como store local transaccional para Sessions, mensajes, eventos y proyecciones. En `dev` conviven varias representaciones:
 
-- tablas canónicas/históricas V1: `session`, `message`, `part`;
-- log durable V2: `event`, `event_sequence`;
-- proyecciones/admission V2: `session_message`, `session_input` y tablas relacionadas.
+- compatibilidad V1: `session`, `message`, `part`;
+- log durable: `event`, `event_sequence`;
+- read/admission V2: `session_message`, `session_input` y tablas relacionadas.
 
-Paths clave:
+Paths de mayor peso:
 
 - `packages/core/src/event/sql.ts`
 - `packages/core/src/session/sql.ts`
-- `packages/core/src/database/migration.ts`
-- `packages/core/src/database/sqlite.ts`
+- `packages/core/src/event.ts`
 - `packages/core/src/session/projector.ts`
+- `packages/core/src/session/store.ts`
+- `packages/core/src/session.ts`
+- `packages/core/src/database/migration.ts`
 
-## 2. Event tables
+## 2. Tablas del event log
 
-`event` conserva el hecho durable, su tipo versionado, payload, aggregate ID, sequence y creación.
+`EventSequenceTable` contiene exactamente:
 
-`event_sequence` mantiene el último `seq` por aggregate y metadata de ownership usada para coordinación/consistencia.
+- `aggregate_id` primary key;
+- `seq`;
+- `owner_id` opcional.
 
-**Hecho confirmado:** el sequence no se deriva recalculando `MAX(seq)` en cada publicación; existe estado explícito del aggregate.
+`EventTable` contiene exactamente:
 
-## 3. Proyecciones de Session
+- `id` primary key;
+- `aggregate_id` FK a `event_sequence`;
+- `seq`;
+- `type`;
+- `data` JSON.
 
-`packages/core/src/session/projector.ts` aplica eventos de Session a vistas de lectura.
+**Corrección:** la tabla `event` actual **no tiene columna de creación/timestamp**. El orden durable procede de `(aggregate_id, seq)`.
 
-Durante la transición se mantienen proyecciones paralelas:
+Indices confirmados:
 
-- compatibilidad V1 sobre `session/message/part`;
-- timeline V2 sobre `session_message`.
+- unique `(aggregate_id, seq)`;
+- `(aggregate_id, type, seq)`.
 
-**Hecho confirmado:** el mismo evento durable puede alimentar más de una representación.
+## 3. Sequence explícito
 
-**Inferencia:** los projectors encapsulan compatibilidad y permiten sustituir gradualmente el read model sin exigir una migración big-bang de todos los clientes.
+`event_sequence` mantiene el último sequence por aggregate; EventV2 no necesita recalcular `MAX(seq)` para cada publicación.
 
-## 4. Transaction boundary
+Un aggregate nuevo parte conceptualmente de `latest = -1`, por lo que su primer evento recibe `seq = 0`.
 
-`EventV2.commit()` ejecuta projectors y persistencia del evento dentro de la misma transacción SQLite.
+## 4. Projectors y transacción
 
-Consecuencia:
+`packages/core/src/session/projector.ts` registra projectors sobre EventV2.
 
-```text
-no existe estado normal:
-  evento committed
-  pero projector principal no aplicado
-```
+El mismo componente mantiene durante la transición:
 
-Si falla un projector, falla el commit completo.
+- filas V1 `session/message/part`;
+- `session_message` V2;
+- admission/state en `session_input`;
+- campos derivados de Session, usage y cambios agent/model/location.
 
-**Inferencia:** el sistema prefiere consistencia síncrona local frente a proyecciones eventually-consistent para el timeline principal.
+Los projectors se ejecutan dentro de la misma transacción que avanza `event_sequence` e inserta el evento durable.
 
-## 5. `SessionStore` como read side
+**Hecho confirmado:** un fallo del projector aborta ese commit durable local.
 
-`session-store-reads`, commit `bc922b8ac590a48ae0fa4b14919c04f2886022d5`, extrae consultas proyectadas hacia `SessionStore`.
+## 5. Ordering de `session_message`
 
-Incluye:
-
-- list de Sessions con filtros y anchor;
-- messages paginados por `session_message.seq`;
-- decodificación de filas mediante history/codec.
-
-### Ordering de Session list
-
-El list usa `time_updated` y un ID tie-breaker para obtener paginación estable.
-
-### Ordering de messages
-
-Messages usa `seq` como boundary del cursor.
-
-**Inferencia:** esta extracción formaliza un patrón CQRS parcial: Session service gobierna commands/policy y Store gobierna materialized reads.
-
-## 6. `message-row-codec`
-
-Commit `ffaaad89a44fd4069c8f5f232c9cfaea1163dc6b` centraliza transformación Message ↔ row.
-
-Esto es relevante para persistence porque elimina múltiples interpretaciones del JSON `data` y establece que columnas canónicas como `id` y `type` prevalecen.
-
-## 7. `storage-v2-service`
-
-La línea contiene commits como:
-
-- `b3d6f931484137d271039272a9cc756c741f9095` — compartir Effect SQLite database layer;
-- `71423b9a5825eed2a018b5cc118dcf26f19ed6f1` — mantener setup de DB de tests explícito;
-- `178840489f3c99b1a47f1aa94ca25585c8dd1e03` — documentar cleanup/bootstrap;
-- `c633d10e744f1977c1776cc040eadf6772426950` — simplificar storage contract setup.
-
-**Hecho confirmado:** el acceso SQLite se convirtió en un service/layer compartido y testeable dentro de la arquitectura Effect.
-
-**Inferencia:** persistence deja de pertenecer implícitamente al módulo Session y pasa a ser una dependency injectable del core.
-
-## 8. Branch `sqlite`
-
-`sqlite` es una línea mucho más antigua, con commits amplios de sincronización. Su valor es arqueológico: demuestra la adopción temprana de SQLite, pero no permite atribuir finamente los invariantes actuales a un único diff.
-
-Se considera antecedente, no baseline.
-
-## 9. Migraciones
-
-`packages/core/src/database/migration.ts` mantiene una tabla de migraciones y ejecuta cambios ordenados de schema/data.
-
-Las migraciones son especialmente importantes durante V2 porque algunas tablas eran declaradas explícitamente experimentales y reconstruibles.
-
-## 10. Reset boundary de V2 beta
-
-El commit `f2d133edf7430f3229a84c29d6b0e1690f1f2a60` añadió una migración que elimina contenido de:
-
-- `session_input`;
-- `session_message`;
-- `event`;
-- `event_sequence`.
-
-Y documenta que no deben truncarse como parte de ese reset:
-
-- `session`;
-- `message`;
-- `part`.
-
-### Interpretación
-
-**Hecho confirmado:** en ese momento la historia V1 era la frontera de compatibilidad preservada y el estado V2 aún podía reconstruirse/descartarse.
-
-**Hecho confirmado:** resetear `event`/`event_sequence` eliminaba capacidad de replay/warp V2 previa hasta generar nueva historia durable.
-
-## 11. Schema evolution de eventos
-
-`normalize-step-event-versions` documenta otro reset de estado experimental para cambiar contratos incompatibles sin cargar decoders eternos durante la beta.
-
-Esto ilustra dos estrategias:
-
-1. migración compatible cuando historia estable debe sobrevivir;
-2. reset explícito cuando el estado sigue siendo beta y está declarado disposable.
-
-## 12. IDs persistidos
-
-Los IDs modernos están tipados por dominio. El caso más importante es:
+Cuando el projector inserta un `SessionMessage`, usa:
 
 ```text
-Event.ID          evt_*
-SessionMessage.ID msg_*
+session_message.seq = event.durable.seq
 ```
 
-La persistencia ya no usa implícitamente el mismo string como identidad de ambos objetos.
+Así el read model V2 hereda el ordering del event aggregate.
 
-**Inferencia:** prefijos y branded schemas actúan como defensa runtime/type-level contra joins y lookups en el dominio equivocado.
+`SessionV2.messages()` pagina por ese `seq`; si se suministra un cursor de Message, primero obtiene el sequence de la fila anchor y consulta antes/después de ese boundary.
 
-## 13. Recovery y durability
+## 6. `SessionStore` actual
 
-La persistencia permite que una Session siga siendo legible aunque su directory/worktree ya no exista. `orphan-session-recovery` demuestra que location availability y durability de la historia son concerns distintos.
+`packages/core/src/session/store.ts` **no expone actualmente `list()` ni paginación de mensajes**. Su interfaz vigente contiene:
 
-La eliminación física de un worktree no equivale a borrar Session/event history.
+- `get(sessionID)`;
+- `context(sessionID)`;
+- `runnerContext(sessionID, baselineSeq)`;
+- `message(messageID)`.
 
-## 14. Invariantes de persistence
+Las operaciones de list/messages paginadas están implementadas en `SessionV2.Service` (`packages/core/src/session.ts`) sobre las mismas tablas.
 
-### Confirmados
+Esta distinción corrige una atribución anterior basada en la branch histórica `session-store-reads`.
 
-- SQLite es el store transaccional principal local.
-- event sequence se persiste por aggregate.
-- projectors y event commit comparten transacción.
-- V2 tiene read model `session_message` ordenado por `seq`.
-- hay migrations explícitas y una frontera documentada entre estado beta descartable y V1 preservado.
-- codecs encapsulan representación de Message rows.
+## 7. Ordering de Session list V2
 
-### Inferencias
+`SessionV2.list()` usa actualmente como sort column:
 
-- el diseño busca separar write model/event log de read models sin introducir consistencia eventual local.
-- los resets beta permitieron iterar schemas rápidamente antes de declarar compatibilidad estable.
-- `SessionStore` es el inicio de un read-side más autónomo y potencialmente reemplazable.
+```text
+SessionTable.time_created
+```
+
+con `SessionTable.id` como tie-breaker, y soporta `asc/desc` + anchors previous/next.
+
+**Corrección:** no debe afirmarse que el list V2 actual ordena por `time_updated`; ese criterio aparece en otras/antiguas surfaces, incluido el list legacy de `packages/opencode`, pero no en esta implementación V2.
+
+## 8. Compatibilidad V1
+
+`packages/opencode/src/session/session.ts` sigue leyendo/escribiendo el `SessionTable` compartido mediante APIs legacy-compatible, y `MessageV2` trabaja sobre `MessageTable`/`PartTable`.
+
+La coexistencia de esas tablas con `session_message` no implica que una de las representaciones pueda eliminarse hoy sin revisar consumidores.
+
+## 9. Codec y autoridad de columnas
+
+La evolución `message-row-codec` formaliza que identity/discriminant estructurales deben venir de columnas canónicas y no de copias stale dentro del JSON `data`.
+
+El source actual de `SessionProjector` codifica `SessionMessage`, separa `id` y `type`, y guarda el resto en `data`.
+
+## 10. Migraciones y resets beta
+
+`packages/core/src/database/migration.ts` contiene migraciones ordenadas de schema/data.
+
+Durante la evolución V2 hubo resets explícitos de tablas reconstruibles/experimentales, incluidos `session_input`, `session_message`, `event` y `event_sequence`, mientras se preservaban superficies V1 en migraciones concretas.
+
+Esos resets son hechos históricos de determinadas migraciones; no significan que las tablas V2 actuales deban considerarse descartables permanentemente.
+
+## 11. IDs de dominio
+
+El diseño moderno distingue namespaces de identidad, por ejemplo:
+
+```text
+Event.ID           evt_*
+SessionMessage.ID  msg_*
+```
+
+La separación evita tratar un evento y su proyección de dominio como la misma entidad por accidente.
+
+## 12. Durability frente a filesystem/location
+
+La historia de Session reside en SQLite/event projections; la disponibilidad física del worktree/location es otro concern. Recovery/move pueden operar sobre Sessions persistidas aunque el filesystem original ya no esté disponible.
+
+## Invariantes confirmados
+
+1. SQLite es el store transaccional local principal para estas superficies.
+2. `event` no guarda timestamp de creación en el schema vigente.
+3. el sequence durable se persiste explícitamente por aggregate.
+4. projectors y event insertion forman un transaction boundary.
+5. `session_message.seq` deriva del durable event sequence.
+6. `SessionStore` actual es un read service estrecho; list/messages pagination están en `SessionV2.Service`.
+7. `SessionV2.list()` ordena por `time_created` + ID tie-breaker en `dev`.
+8. V1 y V2 siguen coexistiendo sobre SQLite.
+
+## Referencias
+
+- `packages/core/src/event/sql.ts`
+- `packages/core/src/event.ts`
+- `packages/core/src/session/sql.ts`
+- `packages/core/src/session/projector.ts`
+- `packages/core/src/session/store.ts`
+- `packages/core/src/session.ts`
+- `packages/opencode/src/session/session.ts`
