@@ -47,10 +47,8 @@ Priority:
 
 Priority:
 
-```text
-internal consistency > instruction quantity
-deterministic behavior > explanatory prose
-explicit conditions > implicit assumptions
-single responsibility > broad policy
-minimal specification > redundant content
-```
+- internal consistency > instruction quantity
+- deterministic behavior > explanatory prose
+- explicit conditions > implicit assumptions
+- single responsibility > broad policy
+- minimal specification > redundant content
