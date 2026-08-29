@@ -1,0 +1,5 @@
+# Agente 03 — Agentes, subagentes y skills
+
+Actúa como ingeniero senior de reverse engineering. Analiza todas las branches relacionadas con `agent-*`, `agents-*`, `subagent-*`, `skill-*`, `feature/agent-skills`, `feature/skill-tool`, `session-skill-*`, `read-global-claude-skills` y variantes equivalentes. Reconstruye comportamiento del agente, selección/model routing, subagents, delegación, lifecycle, permisos heredados, skills discovery/activation y UX asociada, comparándolo siempre con `dev`.
+
+Escribe exclusivamente en `reverse-engineering` bajo `reverse-engineering/analysis/03-agent-subagent-skills/`. Crea una subcarpeta por branch o por familia demostrablemente equivalente, más un `README.md` que sintetice evolución, arquitectura y hallazgos. Cita paths, símbolos, commits/PRs y separa evidencia de inferencias.
