@@ -1,126 +1,124 @@
-# Instrucciones: discovery, herencia y variantes dinámicas
+# Instrucciones: discovery, herencia y contexto dinámico
 
-## Resumen
+## Corrección de auditoría
 
-La evolución de instrucciones muestra dos arquitecturas distintas:
+En `dev` coexisten dos mecanismos de instrucciones. La implementación de `packages/opencode/src/session/instruction.ts` **sigue vigente y está cableada por `SessionPrompt`**; no es correcto describirla como un runtime histórico ya sustituido. En paralelo, Core V2 contiene `packages/core/src/instruction-context.ts`, que integra instrucciones en `SystemContext`/`SessionContextEpoch`.
 
-1. **runtime histórico:** resolver archivos de instrucciones y añadir/injectar su contenido directamente al prompt o al historial;
-2. **`dev` actual:** representar las instrucciones ambientales como una fuente durable de `SystemContext`, de modo que la sesión conserva qué versión de esas instrucciones conoce el modelo y recibe deltas cuando cambian.
+## Path de producto: `Instruction.Service`
 
-## Estado vigente en `dev`
+Archivo: `packages/opencode/src/session/instruction.ts`.
 
-### Fuente de instrucciones
+### Fuentes globales
 
-**CONFIRMADO EN `dev`:** `packages/core/src/instruction-context.ts` integra las instrucciones del workspace/proyecto en `SystemContext`. Su identidad de fuente permite snapshot, refresh y updates.
+El servicio construye `globalFiles` con:
 
-La consecuencia importante no es sólo dónde se lee `AGENTS.md`, sino cómo se trata temporalmente:
+- `<global-config>/AGENTS.md`;
+- `~/.claude/CLAUDE.md` como fallback cuando Claude prompt compatibility no está deshabilitada.
 
-- el contenido inicial forma parte del baseline privilegiado;
-- cambios posteriores se convierten en updates `system`;
-- una lectura temporalmente fallida no debe interpretarse como eliminación;
-- tras una compaction el epoch puede rebaselinar el estado conocido.
+`systemPaths()` recorre esos candidatos en orden y se queda con el primer fichero existente.
 
-### Instrucciones del agente
+### Fuentes de proyecto
 
-**CONFIRMADO EN `dev`:** el agente seleccionado puede aportar `agent.info.system`. El runner lo coloca en `request.system` antes/junto al baseline del `SessionContextEpoch`.
+Los nombres reconocidos son:
 
-Por tanto hay, como mínimo, dos clases de instrucciones privilegiadas:
+1. `AGENTS.md`;
+2. `CLAUDE.md` cuando la compatibilidad está habilitada;
+3. `CONTEXT.md` marcado explícitamente como deprecated.
 
-- instrucciones definidas por la configuración/selección del agente;
-- instrucciones/contexto ambiental producido por fuentes registradas.
+Para cada tipo se usa `findUp()` desde el directorio de la instance hasta el worktree. **El primer tipo con matches gana**, por lo que no se apilan automáticamente `AGENTS.md` y `CLAUDE.md` como dos familias simultáneas.
 
-### Skills y referencias como contexto dinámico
+Cuando `OPENCODE_DISABLE_PROJECT_CONFIG` está activo, se evita el discovery de proyecto.
 
-**CONFIRMADO EN `dev`:** `packages/core/src/session/runner/llm.ts` combina `systemContext.load()`, `skillGuidance.load(agent)` y `referenceGuidance.load()` antes de inicializar/preparar el context epoch. Esto significa que la arquitectura de fuentes dinámicas ya no se limita a `AGENTS.md`: skills y guidance de referencias pueden participar en el mismo baseline/diff contextual.
+### Instrucciones configuradas
 
-## Evolución histórica de `AGENTS.md`
+`config.instructions` admite:
+
+- rutas/patrones locales relativos;
+- rutas absolutas;
+- `~/...`;
+- URLs `http://` / `https://`.
+
+Las rutas locales se resuelven mediante glob; las URLs se descargan con timeout y tolerancia a fallo. `system()` devuelve cada contenido prefijado por `Instructions from: <source>`.
+
+### Instrucciones path-local al leer archivos
+
+`resolve(messages, filepath, messageID)` camina desde el directorio del fichero leído hacia la raíz de la instance. Puede cargar archivos de instrucciones cercanos que no formen ya parte de las instrucciones de sistema.
+
+La deduplicación tiene tres defensas:
+
+- no volver a adjuntar paths ya incluidos en `systemPaths()`;
+- no volver a adjuntar paths detectados en metadata `loaded` de resultados previos de `read`;
+- usar un conjunto de `claims` por `messageID` para evitar duplicados durante el mismo assistant message.
+
+`clear(messageID)` elimina esas claims al terminar el intento.
+
+**Conclusión:** el runtime de producto sigue usando discovery directo de archivos/URLs y una capa de deduplicación ligada a lecturas.
+
+## Cómo entra al system prompt de producto
+
+En `packages/opencode/src/session/prompt.ts`, cada provider turn obtiene en paralelo:
+
+- `SystemPrompt.skills(agent)`;
+- `SystemPrompt.environment(model)`;
+- `Instruction.system()`;
+- `SystemPrompt.mcp(agent, session.permission)`.
+
+Esos elementos forman `system[]` y se entregan al processor/LLM. Por tanto, el contenido de `Instruction.system()` se reconstruye para el turno; no depende de `SessionContextEpoch` en este path.
+
+## Path V2/Core: `InstructionContext`
+
+Archivo: `packages/core/src/instruction-context.ts`.
+
+En el runner V2, las instrucciones ambientales participan como fuente de `SystemContext`. Ese modelo permite:
+
+- identidad de fuente;
+- snapshot por sesión;
+- refresh/diff;
+- updates `system` posteriores al baseline;
+- distinguir una observación `unavailable` de una eliminación real.
+
+Esta arquitectura es más durable que el ensamblado directo del path legacy-compatible, pero ambos mecanismos existen en el mismo `dev`.
+
+## Evolución histórica
 
 ### `adjust-instructions-logic`
 
-**CONFIRMADO EN BRANCH** — commit `f2e1dbda16795e61c6533bd5cb1e842aa293604d`.
+Commit `f2e1dbda16795e61c6533bd5cb1e842aa293604d`.
 
-En la implementación histórica `packages/opencode/src/session/instruction.ts` se ajustó la resolución de archivos globales:
-
-- podían coexistir `AGENTS.md` del directorio de configuración explícito y del config global;
-- `~/.claude/CLAUDE.md` actuaba como fallback cuando no existían esos `AGENTS.md` y no estaba deshabilitado;
-- las instrucciones configuradas podían resolverse como rutas/globs relativos o absolutos;
-- `CONTEXT.md` aparecía todavía como nombre deprecated en esa generación.
-
-**NO VIGENTE COMO IMPLEMENTACIÓN:** esta lógica pertenece al runtime antiguo. Es útil para reconstruir precedencias, pero `dev` ya no usa esta pieza como centro del ensamblado del prompt.
-
-### `instruction-rename`
-
-**CONFIRMADO EN BRANCH, alcance histórico:** esta línea acompaña la transición desde instrucciones tratadas como prompt auxiliar hacia instrucciones con identidad/durabilidad en la sesión. Debe leerse junto con las ramas de instruction discovery posteriores, no como API vigente.
+Explora precedencia/global fallbacks y resolución de instrucciones. Varias de esas preocupaciones siguen visibles en `Instruction.Service`; no debe presentarse toda la familia como obsoleta conceptualmente.
 
 ### `read-instruction-dedup`
 
-**CONFIRMADO EN BRANCH** — commit `0ed6a9c1a9021b1355a931481499049248e8f43f`.
+Commit `0ed6a9c1a9021b1355a931481499049248e8f43f`.
 
-Esta etapa atacaba un problema concreto: al leer un `AGENTS.md` path-local mediante una tool, su contenido podía convertirse en instrucción de sesión y además aparecer como output de la propia lectura. La solución histórica deduplicaba esa doble exposición y registraba metadata de paths de instrucciones.
-
-**INFERENCIA, confianza alta:** la necesidad de dedup es evidencia de que el diseño “inyectar instrucciones descubiertas como mensajes sintéticos” tenía acoplamiento fuerte entre tool execution e instruction state. La arquitectura `SystemContext` elimina gran parte de ese acoplamiento al volver las instrucciones una fuente observable independiente.
+Ataca la doble exposición de una instrucción obtenida mediante `read`. La implementación vigente conserva explícitamente mecanismos de deduplicación (`extract(messages)` + `claims`).
 
 ### `instruction-read-race`
 
-**CONFIRMADO EN BRANCH** — commit `1bbe16b93e2d36f816811629ee2791d73c960d15`.
+Commit `1bbe16b93e2d36f816811629ee2791d73c960d15`.
 
-Corrige una carrera filesystem: una instrucción observada podía desaparecer entre `exists()` y `read`. La branch evita interpretar esa lectura fallida como una retirada real de una instrucción previamente admitida.
+La preocupación por distinguir una lectura transitoriamente fallida de una retirada real reaparece de forma más explícita en `SystemContext.unavailable` del pipeline V2.
 
-**CONFIRMADO EN `dev` COMO SEMÁNTICA GENERAL:** `SystemContext.unavailable` conserva esta distinción entre “no pude observarla” y “la fuente fue eliminada”.
+### `namespace-instructions`
 
-## Instrucciones heredadas y path-local
+Sigue siendo evidencia de branch; no debe describirse como contrato general de `dev` salvo que el código vigente de Code Mode lo confirme específicamente.
 
-### Modelo histórico
+## Precedencia: no hay una única tabla global
 
-La generación `InstructionPrompt` hacía discovery ascendente desde el directorio activo hacia el límite del worktree, combinándolo con archivos globales/configurados. Eso producía una jerarquía de instrucciones heredadas por ubicación.
+En el path `packages/opencode`, la precedencia efectiva emerge de varias capas: prompt/provider base, entorno, instrucciones, MCP/skills, agente, transformaciones y el historial. En V2, `agent.info.system`, baseline de `SystemContext` y updates del historial forman otro esquema.
 
-### Modelo actual
-
-**CONFIRMADO EN `dev`:** la jerarquía física sigue siendo responsabilidad del proveedor de instrucciones, pero la sesión ya no necesita asumir que todos esos archivos son un bloque estático. Recibe el estado materializado de la fuente y sus cambios a través del context epoch.
-
-**INFERENCIA, confianza alta:** el boundary correcto es:
-
-```text
-filesystem/config -> instruction discovery -> fuente SystemContext -> snapshot por sesión -> baseline/deltas
-```
-
-no:
-
-```text
-filesystem/config -> concatenación directa al prompt en cada turn
-```
-
-## `namespace-instructions`
-
-### Qué introduce
-
-**CONFIRMADO EN BRANCH** — commit base `5d4c4d0ede0a74d38649ce7094c78d55eb4246fa`, seguido por validaciones y simplificación de presupuesto.
-
-La branch añade instrucciones asociadas a namespaces de herramientas de Code Mode:
-
-- una tool puede registrar `namespaceInstructions` junto con su namespace;
-- no se admiten instrucciones de namespace si la tool no está namespaced;
-- varias tools del mismo namespace no pueden registrar instrucciones conflictivas;
-- las instrucciones se renderizan una sola vez antes de los listings del namespace;
-- sobreviven aunque el presupuesto sea tan pequeño que ninguna firma de tool quepa;
-- **consumen presupuesto** del catálogo;
-- si cambian, el catálogo se reemplaza de forma durable para evitar que el modelo mezcle guidance viejo y nuevo.
-
-### Estado frente a `dev`
-
-**NO CONFIRMADO EN `dev` / BRANCH-ONLY:** a 29 de agosto de 2026 esta extensión no debe describirse como contrato del runtime vigente. Es evidencia de una dirección arquitectónica: hacer que instrucciones dinámicas asociadas a subsistemas registrables tengan la misma propiedad de durabilidad y reemplazo que el resto del contexto.
-
-## Precedencia conceptual
-
-El código no expone una única tabla formal de precedencia, pero la construcción del request permite distinguir niveles:
-
-1. `agent.info.system` — instrucciones propias del agente activo.
-2. baseline/deltas de `SystemContext` — entorno, instrucciones del proyecto y guidance dinámico.
-3. historial de usuario/assistant/tools — contenido conversacional.
-4. checkpoint de compaction — historia resumida, explícitamente degradada a role `user` para que no gane autoridad accidentalmente.
-
-**INFERENCIA, confianza alta:** la elección de role del checkpoint es una defensa deliberada contra instruction resurrection: una frase que apareció históricamente dentro de una conversación no debe volver a convertirse en instrucción system sólo porque fue resumida.
+Por ello no es seguro publicar una única lista de precedencia que mezcle ambos pipelines.
 
 ## Conclusión
 
-La evolución de instrucciones es una transición desde **resolución de archivos** hacia **gestión de estado instruccional**. El problema principal ya no es sólo “qué `AGENTS.md` leo”, sino “qué instrucciones cree vigentes el modelo en esta sesión y cómo actualizo esa creencia sin duplicación, carreras ni resurrección de instrucciones antiguas”.
+La evolución real no es “el viejo InstructionPrompt desapareció y todo pasó a ContextEpoch”. La verdad de `dev` es:
+
+```text
+PRODUCTO / packages/opencode
+filesystem + config + URLs -> Instruction.Service -> system[] por turno
+
+V2 / packages/core
+instruction source -> SystemContext -> SessionContextEpoch -> baseline/deltas
+```
+
+Ambos son comportamiento real y deben distinguirse al documentar instrucciones.
