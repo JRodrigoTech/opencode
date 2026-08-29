@@ -9,7 +9,7 @@ Rules:
 - Omit `(scope)` only when the change is genuinely cross-cutting or no meaningful scope exists
 - `summary` MUST be short, specific, and describe the concrete change
 - Use lowercase for `type` and `scope`
-- Do not end the summary with a period [ .]
+- Do not end the summary with a period `.`
 - One commit SHOULD represent one coherent change
 
 Examples:
