@@ -2,15 +2,15 @@
 
 ## Objetivo
 
-Este análisis usa las ramas de refactor de Effect, namespaces, facades, `LayerNode` y extracción de `core` como evidencia para reconstruir los **boundaries reales** de OpenCode. El foco no es describir el estilo de código, sino identificar qué piezas se intentaron convertir en servicios independientes, cómo se compone su grafo de dependencias, quién posee el estado y qué líneas de refactor sobrevivieron en `dev`.
+Este análisis usa las ramas de refactor de Effect, namespaces, facades, `LayerNode` y extracción de `core` como evidencia para reconstruir los **boundaries reales** de OpenCode. El foco no es describir archivos, sino identificar qué piezas se intentaron convertir en componentes independientes, cómo se compone su grafo de dependencias, quién posee el estado y qué líneas de refactor sobrevivieron en `dev`.
 
-Baseline: `dev` (`dc4449df0d52199704ea4989a5a993ebbc605612` en el momento del análisis).
+Baseline analizada: `dev` (`dc4449df0d52199704ea4989a5a993ebbc605612`).
 
 ## Conclusión principal
 
-**Hecho observado — confianza alta.** La arquitectura vigente ya no depende únicamente de convenciones informales. `dev` contiene un grafo de dependencias ejecutable construido con `LayerNode`; `packages/opencode/src/effect/app-runtime.ts` compone `AppLayer` desde nodos de servicio y `packages/core/src/effect/app-node.ts` impone dos tags de lifetime/dependencia: `global` y `location`.
+**Hecho observado — confianza alta.** La arquitectura vigente contiene un grafo de dependencias ejecutable construido con `LayerNode`; `packages/opencode/src/effect/app-runtime.ts` compone `AppLayer` desde nodes de servicio y `packages/core/src/effect/app-node.ts` impone dos tags arquitectónicos: `global` y `location`.
 
-**Inferencia arquitectónica — confianza alta.** Las ramas estudiadas muestran una transición desde un monolito de módulos con funciones async y estado implícito hacia una arquitectura de **servicios Effect con puertos explícitos, composición declarativa, lifetimes diferenciados y adapters en los bordes**. La unidad de modularidad relevante no es el fichero ni el `namespace`: es el servicio + su nodo + sus dependencias + el scope que posee su estado.
+**Inferencia arquitectónica — confianza alta.** Las ramas estudiadas muestran una transición desde un monolito de módulos con funciones async y estado implícito hacia una arquitectura de **servicios Effect con puertos explícitos, composición declarativa, lifetimes diferenciados y adapters en los bordes**. La unidad de modularidad relevante no es el fichero ni el `namespace`: es el servicio + su node + sus dependencias + el scope que posee su estado.
 
 ## Arquitectura reconstruida
 
@@ -43,37 +43,47 @@ Baseline: `dev` (`dc4449df0d52199704ea4989a5a993ebbc605612` en el momento del an
                  └──── adapters/bridges durante la migración
 ```
 
-Además aparece un cuarto lifetime para recursos operacionales: **handles por operación**. `effect/session-transport-service` reemplaza un `Layer.fresh` por sesión por un servicio fábrica estático cuyo `make(input)` devuelve un handle propietario de `Scope`/`AbortController`.
+Existe además un lifetime operacional: `effect/session-transport-service` reemplaza un `Layer.fresh` por operación por un servicio fábrica cuyo `make(input)` devuelve un handle scoped.
 
 ## Boundaries confirmados
 
-| Boundary | Evidencia en `dev` | Lectura arquitectónica |
+| Boundary | Evidencia | Lectura arquitectónica |
 |---|---|---|
-| Global ↔ Location | `packages/core/src/effect/app-node.ts` | `location` puede depender de `global`; el sentido inverso queda prohibido por tags. |
-| App orchestration ↔ Core reusable | `packages/opencode/...` frente a `packages/core/...`; `packages/core/AGENTS.md` | `core` se diseña como runtime Node-compatible reutilizable por desktop/SDK; app conserva CLI/server y compatibilidad. |
-| Project legacy ↔ ProjectV2 | `packages/opencode/src/project/project.ts` depende de `ProjectV2.node` | Patrón strangler: servicio app/persistencia envuelve/resuelve mediante core nuevo. |
-| Instance lifecycle ↔ service lifetime | `InstanceStore`, `InstanceState`, `InstanceBootstrap` | Servicios pueden ser globales mientras el estado mutable se cachea por directory y se dispone por instancia. |
-| Location lifecycle ↔ global services | `LocationServiceMap`, `location-services.ts` | Core nuevo materializa un subgrafo fresco por `Location.Ref` y hoistea dependencias globales. |
-| Plugin authoring ↔ host runtime | `effect-plugin-adapter`, `plugin-effect-runtime` | El contrato público tiende a ser runtime-neutral; Effect queda como authoring/runtime interno y se adapta en el borde. |
-| Service API ↔ Promise facade | `effect/define-service-helper` vs `effect/kill-tuiconfig-installation-facades` | Las facades Promise fueron una etapa transitoria; la dirección final favorece `Service` + `AppRuntime`. |
-| Filesystem global ↔ filesystem contextual | `FSUtil`/`AppFileSystem` y `core FileSystem.node(Location)` | El nuevo core hace explícito que búsqueda/mutación de archivos depende de una location, no solo del proceso. |
+| Global ↔ Location | `packages/core/src/effect/app-node.ts` | `location` puede depender de `global`; la dirección inversa queda prohibida por tags. |
+| App orchestration ↔ Core reusable | `packages/opencode/...`, `packages/core/...`, `packages/core/AGENTS.md` | Core se diseña Node-compatible/reusable; app conserva CLI/server/compatibilidad. |
+| Project legacy ↔ ProjectV2 | `packages/opencode/src/project/project.ts` | Patrón strangler: el servicio app/persistencia delega semántica al core nuevo. |
+| Instance lifecycle ↔ service lifetime | `InstanceStore`, `InstanceState`, `InstanceBootstrap` | Un service global puede poseer estado aislado por directory con cleanup explícito. |
+| Location lifecycle ↔ global services | `LocationServiceMap`, `location-services.ts` | Core materializa un subgrafo por `Location.Ref` y hoistea deps globales. |
+| Plugin authoring ↔ host runtime | `effect-plugin-adapter`, `plugin-effect-runtime` | Effect queda aislado del contrato portable mediante Promise/Standard Schema adapters. |
+| Service API ↔ Promise facade | ramas `facade/*` y eliminación de `makeRuntime` | Las facades internas fueron scaffolding migratorio; adapters externos pueden seguir siendo válidos. |
+| Filesystem platform ↔ filesystem contextual | FSUtil/App filesystem y `FileSystem.node(Location)` | El filesystem de dominio se interpreta respecto a Location. |
+| Environment ↔ service graph | `config-effect-v2` | Configuración migra de `process.env` import-time a `Effect.Config`/`ConfigProvider`. |
 
-## Documentos
+## Organización por familia arquitectónica
 
-1. [`01-branch-inventory.md`](./01-branch-inventory.md) — inventario de familias y cobertura.
-2. [`02-effect-services-and-facades.md`](./02-effect-services-and-facades.md) — migración a servicios, runtimes y facades.
-3. [`03-layer-node-dependency-graph.md`](./03-layer-node-dependency-graph.md) — DI, tags, replacements, hoisting y graph compilation.
-4. [`04-state-lifetimes-and-filesystem.md`](./04-state-lifetimes-and-filesystem.md) — ownership de estado, scopes, instances, locations y filesystem.
-5. [`05-core-extraction.md`](./05-core-extraction.md) — extracción de `core`, compatibilidad Node y dependency inversion.
-6. [`06-domain-boundaries.md`](./06-domain-boundaries.md) — Project, Session, Provider, Plugin, Config y Workspace.
-7. [`07-refactor-lineage.md`](./07-refactor-lineage.md) — qué fue integrado, parcialmente integrado, reemplazado o abandonado.
+- [`branches/README.md`](./branches/README.md) — inventario, cobertura y cronología de branches.
+- [`effect-services/README.md`](./effect-services/README.md) — Effect Services, facades y runtimes.
+- [`dependency-graph/README.md`](./dependency-graph/README.md) — `LayerNode`, DI, tags, replacements, hoisting y compilation.
+- [`lifetimes-filesystem/README.md`](./lifetimes-filesystem/README.md) — ownership de estado, scopes, instance/location/operation y filesystem.
+- [`core-extraction/README.md`](./core-extraction/README.md) — extracción de `core`, Node compatibility, ports y adapters.
+- [`domains/README.md`](./domains/README.md) — Project, Session, Config, Plugin, Provider y Workspace.
+- [`lineage/README.md`](./lineage/README.md) — refactors integrados, parciales, reemplazados o reinterpretados.
+
+## Hallazgos clave
+
+1. `LayerNode` terminó convertido en arquitectura ejecutable, no solo helper de tests.
+2. La regla de dependencia más fuerte es `location → global`; `LocationServiceMap` permite cruzar ese boundary sin invertirlo.
+3. `InstanceState` desacopla lifetime del service y lifetime del estado; los subgrafos Location hacen explícito el mismo problema a escala mayor.
+4. Project y Session se descomponen alrededor de identidad, persistencia, proyección, ejecución y contexto.
+5. Plugins son un boundary de runtime real: no se presupone identidad compartida de Effect/Schema entre host y extensión.
+6. `packages/core` representa portabilidad de dominio/runtime, no una mera colección de utilidades.
+7. Provider y Workspace siguen mostrando más señales de transición y concentración de responsabilidades que LayerNode, SessionV2 o filesystem location-scoped.
+8. Los refactors no integrados siguen siendo evidencia cuando sus seams reaparecen en `dev` bajo una implementación posterior.
 
 ## Convención de evidencia
 
-Cada documento usa explícitamente:
-
 - **Hecho observado**: demostrable en código, diff, branch o commit inspeccionado.
-- **Inferencia arquitectónica**: conclusión derivada de varios hechos.
+- **Inferencia arquitectónica**: conclusión derivada de uno o varios hechos.
 - **Confianza alta/media/baja**: fuerza de la evidencia disponible.
 
-No se considera que el nombre de una branch pruebe por sí solo una intención. Cuando una rama solo aporta señal nominal o periférica se indica como tal.
+El nombre de una branch no se toma por sí solo como prueba de intención. En familias con muchas ramas solapadas se combina inventario por patrón con análisis profundo de commits representativos.
