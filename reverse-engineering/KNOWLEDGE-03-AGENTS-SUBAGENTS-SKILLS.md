@@ -70,7 +70,7 @@ flowchart TD
     DISC --> CAT[Nombre + descripción]
     CAT --> SYS[Catálogo ligero en system prompt]
     SYS --> DEC[LLM decide usar skill]
-    DEC --> TOOL[skill(name)]
+    DEC --> TOOL["skill(name)"]
     TOOL --> PERM[Permiso]
     PERM --> FULL[SKILL.md + resources]
     FULL --> CTX[Contexto de la Session]
