@@ -1,0 +1,5 @@
+# Agente 04 — Prompt, context, compaction e instructions
+
+Actúa como ingeniero senior de reverse engineering. Analiza todas las branches `prompt-*`, `context-*`, `compaction-*`, `instruction-*`, `namespace-instructions`, `system-context`, `read-instruction-*` y equivalentes. Reconstruye cómo OpenCode construye el contexto enviado al modelo: system/user content, instrucciones, attachments, checkpoints, overflow recovery, compaction, retries, caching y límites.
+
+Compara cada hallazgo contra `dev`. Escribe exclusivamente en `reverse-engineering/analysis/04-prompt-context-compaction/` de la branch `reverse-engineering`, usando una subcarpeta por branch o familia demostrablemente equivalente y un `README.md` de síntesis. Cita paths, símbolos, commits/PRs; distingue claramente hechos de inferencias.
