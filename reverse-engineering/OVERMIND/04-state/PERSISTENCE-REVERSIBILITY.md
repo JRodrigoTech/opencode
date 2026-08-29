@@ -1,59 +1,52 @@
-# Persistence, Mutation Journal and Reversibility
+# Persistence and Reversibility — separar estado de Overmind y estado delegado
 
-## Persistence
+## OpenCode delegation no requiere persistence general
 
-**RECOMMENDED:** introducir persistence como required EVENT sink + Session repository, no dentro de ContextCompiler.
+Para el MVP, una Tool puede devolver:
 
-### Qué persistir
+```text
+external_session_id
+summary
+artifact/change refs
+```
 
-- Session metadata/parent relationship.
-- Execution lifecycle.
-- canonical User/Assistant/Protocol units versionados.
-- committed Thinking records si forman parte del transcript.
-- model usage/timing/provider failure evidence.
-- ToolCall/result metadata bounded.
-- Context summary state/source IDs necesarios para resume exacto.
-- stable FACTs.
+El runtime actual puede conservar ese resultado como ProtocolUnit durante la sesión in-memory.
 
-### Qué no usar como autoridad
+## Si Overmind implementa persistence
 
-- raw provider messages como canonical state;
-- provider-private reasoning continuation state como durable cognitive memory;
-- transient SIGNAL deltas para reconstrucción semántica.
+Debe hacerlo por sus propios objetivos: resume, Memory, WebUI, crash recovery, audit, etc.
+
+Persistir entonces un reference record:
+
+```text
+DelegationRecord
+- provider: opencode
+- external_session_id
+- task/result summary
+- artifact refs
+- status/timestamps
+```
+
+No importar toda la database/session history de OpenCode a Overmind.
 
 ## Reversibility
 
-Overmind Workspace ya tiene reversible write/delete recovery. OpenCode demuestra el valor de elevar esto a execution history mediante snapshot/patch/revert.
+Las mutaciones hechas por `OpenCodeDelegateTool` ocurren **dentro del capability backend**. OpenCode posee sus mecanismos de coding state/revert y workspace semantics.
 
-### MutationJournal propuesto
+Overmind WorkspacePlugin ya posee recovery para sus propias write/delete Tools. No generalizarlo a `MutationJournal` solamente porque el agente delegado modifica archivos.
+
+## Cuándo generalizar un journal
+
+Solo si aparecen varias capabilities Overmind que requieren reconciliación uniforme de side effects y el Core necesita gobernar esa semántica.
+
+Hasta entonces:
 
 ```text
-MutationRecord
-- mutation_id
-- session_id / execution_id / tool_call_id
-- capability
-- resource identity
-- operation
-- before fingerprint/ref
-- after fingerprint/ref
-- reversible: bool
-- rollback descriptor/ref
-- state: committed|reverted|reconciliation_required
+Workspace mutations by Overmind -> Workspace recovery
+Coding mutations by OpenCode    -> OpenCode/session responsibility
+External APIs                    -> capability-specific reconciliation
 ```
 
-El journal no necesita ser Core cognitivo. Puede ser un runtime port usado por side-effecting capabilities.
+## Uncertainty rule
 
-## Por qué no copiar Git snapshots literalmente
-
-Overmind tiene foco Windows y un Plugin Workspace propio. La abstraction debe permitir:
-
-- filesystem backup/restore;
-- diff/patch cuando aplique;
-- Git-aware optimization opcional;
-- external APIs no reversibles con reconciliation metadata.
-
-## Exactly-once practical rule
-
-Una Tool side effect committed no se repite automáticamente por model retry o persistence failure. Esto ya está alineado con Overmind: retry físico no redispatcha Tools committed.
-
-Persistence/event required sinks deben fallar cerrado después de side effect y marcar reconciliation si no se puede registrar consistentemente.
+Cancellation/transport failure después de una posible mutation no autoriza a reejecutar ciegamente la misión. Resume/reconcile con identity explícita.

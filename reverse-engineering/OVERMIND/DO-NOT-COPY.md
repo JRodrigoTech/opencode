@@ -1,56 +1,80 @@
 # What Overmind Should Not Copy from OpenCode
 
-## 1. No hacer de Session messages el Context canónico
+## 1. No construir otro coding agent dentro de Overmind
 
-OpenCode está optimizado para conversaciones/tool parts persistentes. Overmind ya posee una abstracción cognitiva más explícita. Mantenerla.
+No copiar el conjunto shell/read/edit/write/apply_patch/grep/glob/LSP/Code Mode/Git workflows para conseguir una capacidad que OpenCode ya ofrece como agente especializado.
 
-**Reject:** cualquier diseño donde resume sea simplemente cargar `messages[]` y enviarlos al provider.
+Cuando Overmind necesite coding complejo, delegar una misión a OpenCode.
 
-## 2. No importar Effect/Layer architecture
+## 2. No replicar los agentes de coding
 
-Effect resuelve necesidades del stack TypeScript de OpenCode. Overmind ya tiene composition root y ports Python explícitos. Copiar la tecnología añadiría complejidad sin trasladar el valor conceptual.
+`build`, `plan`, `explore`, `general` y sus prompts/policies pertenecen al dominio OpenCode. Overmind no necesita mantener copias de esos perfiles para poder utilizarlos.
 
-## 3. No construir un provider registry masivo prematuramente
+## 3. No copiar la jerarquía de subagents solo para programar
 
-`ModelService({"primary": target})` ya admite named targets. Añadir backends concretos cuando exista necesidad. Discovery/profile/router global debe requerir un caso real.
+OpenCode puede lanzar sus propios subagentes dentro de una misión delegada. El parent Overmind no necesita representar cada subagent interno como child Agent propio.
 
-## 4. No usar model-ID hacks para capabilities
+Un futuro Subagent de Overmind debe existir por una necesidad cognitiva general de Overmind, no para reproducir TaskTool.
 
-OpenCode contiene gating pragmático como `gpt-* -> apply_patch` frente a edit/write. Overmind debe preferir `ModelCapabilities` explícitas y capability negotiation.
+## 4. No hacer de Session messages el Context canónico
 
-## 5. No crear un plugin system interceptivo sin límites
+Resume nunca debe convertirse en `load provider messages -> send provider messages`. Canonical ContextUnits y ContextCompiler siguen siendo autoridad.
 
-OpenCode permite hooks que transforman tool definitions/messages/text/env. Overmind ha decidido que plugins extienden mediante public ports y no mutan internals. Mantener esa propiedad.
+## 5. No importar Effect/Layer architecture
 
-Si hace falta middleware, que sea:
+Es una solución del stack TypeScript de OpenCode. Overmind mantiene ports/composition Python explícitos.
 
-- contract-specific;
-- typed;
-- ordered;
-- bounded;
-- auditable;
-- sin acceso a secrets/context ajeno salvo grant.
+## 6. No copiar el provider registry de OpenCode
 
-## 6. No heredar automáticamente poderes a subagents
+El agente OpenCode delegado puede usar sus providers internamente. Overmind mantiene `ModelService -> GenerationExecutor -> ModelBackend` para su propia cognition.
 
-Child execution debe recibir grants calculados explícitamente. Parent capability no implica child capability.
+## 7. No copiar el permission engine solo para controlar OpenCode
 
-## 7. No acoplar reversibility a Git
+Usar dos boundaries:
 
-OpenCode usa snapshots/patches con su workspace model. Overmind debe abstraer mutation records y permitir backend Workspace/FS específico, especialmente por su foco Windows.
+- outer Overmind grant/policy para permitir la delegación y su scope;
+- inner OpenCode permissions para las operaciones de coding.
 
-## 8. No meter client-specific conditions en Core
+Si múltiples capabilities de Overmind prueban la necesidad de runtime approvals, entonces diseñar una primitive neutral.
 
-El capability set no debería preguntar “¿estoy en CLI/WebUI?” mediante globals. La surface debe suministrar capabilities/approver ports explícitos al runtime.
+## 8. No hacer obligatorio SessionService/EventBus/Persistence para la primera delegación
 
-## 9. No mezclar retry técnico con agent continuation
+Una Tool synchronous con `external_session_id` opaque es suficiente para validar el patrón. Extraer infraestructura universal antes de necesitarla contradiría `Simplify first`.
 
-Overmind ya hace esto mejor: GenerationExecutor distingue retry físico, length continuation y recovery. No regresionar a un loop genérico que los confunda.
+## 9. No copiar Git snapshot/revert como Core
 
-## 10. No romper ProtocolUnit atomicity
+Las mutaciones realizadas por el agente OpenCode son responsabilidad de su runtime. Overmind mantiene la recovery de sus propias Workspace Tools. Un journal transversal solo se justifica con evidencia cross-capability.
 
-OpenCode aporta ideas de lifecycle, pero Overmind debe conservar su regla fail-closed: structured ToolCall truncada no ejecuta nada y una Tool exchange completa sigue siendo unidad de protocolo.
+## 10. No usar model-ID hacks
 
-## 11. No adelantar infraestructura
+OpenCode contiene heurísticas pragmáticas de tool selection. Overmind debe mantener capabilities explícitas donde necesite model feature negotiation.
 
-No implementar Kafka, distributed workers, hot plugin reload, service discovery ni generic DI porque OpenCode tenga múltiples interfaces. El diseño de Overmind pide la primitive mínima cuando una capability real lo demuestra.
+## 11. No copiar un hook surface interceptivo
+
+Preservar Plugins por public ports. Observers/typed middleware solo ante casos reales.
+
+## 12. No exponer las tools internas de OpenCode una por una al modelo Overmind
+
+Evitar convertir el Tool catalog de Overmind en una réplica del catálogo OpenCode. Preferir una operación de alto nivel:
+
+```text
+opencode.delegate(task, ...)
+```
+
+Esto reduce tokens de schemas, coupling y decisiones de dominio en el parent.
+
+## 13. No importar transcript/reasoning del agente externo como memoria
+
+Guardar, como máximo, result summary, artifact refs y opaque external session ID. La transcript completa puede permanecer en OpenCode y consultarse on demand.
+
+## 14. No auto-aprobar permisos peligrosos
+
+La production CLI de OpenCode ofrece `--auto`, `--yolo` y `--dangerously-skip-permissions`; el adapter de Overmind no debe convertir estos flags en comportamiento normal. Preferir least privilege y explicit approvals.
+
+## 15. No acoplar Core al wire protocol ACP
+
+ACP pertenece al adapter. El Core ve una Tool/DelegationResult. Si el transporte cambia a CLI JSON, HTTP o otro protocolo, la semántica Overmind no debería cambiar.
+
+## 16. No adelantar infraestructura porque OpenCode sea grande
+
+HTTP server, generated clients, background workers, MCP, provider matrices, persistence avanzada y otros subsistemas deben entrar cuando **Overmind** tenga un caso de uso, no para alcanzar feature parity.

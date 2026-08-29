@@ -1,111 +1,92 @@
-# Priority Roadmap
+# Priority Roadmap — valor para Overmind, no paridad con OpenCode
 
-## P0 — Identity + durable facts
+## P0 — Probar delegación de coding con mínima arquitectura
 
-### 1. Stable IDs
+### 1. Congelar invariants existentes
 
-Introducir tipos/values para:
+No tocar semántica de ContextCompiler, ModelService, ProtocolUnit o Plugin composition para integrar OpenCode.
 
-- `SessionId`
-- `ExecutionId`
-- `EventId`
-- `ToolCallId`
-- opcional `ChildSessionId` como SessionId normal con parent link.
+### 2. OpenCode capability de alto nivel
 
-No sustituir `request_id` cognitivo; mapearlo a Execution metadata.
+Introducir conceptualmente una `OpenCodePlugin`/Tool con una operación tipo:
 
-### 2. EventPort FACT/SIGNAL
+```text
+opencode.delegate(task, session_id?, profile?)
+```
 
-Implementar primero el contract ya diseñado en `EVENTS_SERVICES_CONTRACT.md`.
+El Tool result debe ser bounded y contener la referencia de sesión externa cuando exista.
 
-FACT mínimos:
+### 3. Transporte MVP
 
-- `session.created`
-- `request.started`
-- `user.message.committed`
-- `model.turn.completed`
-- `tool.started`
-- `tool.completed` / `tool.failed`
-- `assistant.message.committed`
-- `request.completed` / `request.failed`
+Usar primero el surface ya existente de OpenCode:
 
-SIGNAL mínimos:
+`opencode run --format json --dir <workspace> --agent <restricted-agent> ...`
 
-- `assistant.stream.delta`
-- `assistant.thinking.delta`
-- `provider.activity`
-- `tool.progress`
+La production CLI también admite `--session`, `--fork`, `--model` y `--agent`.
 
-### 3. Persistence sink
+**No usar `--auto`, `--yolo` ni `--dangerously-skip-permissions` como política normal del adapter.**
 
-Persistir FACTs y canonical ContextUnits suficientes para reanudar sin convertir provider messages en source of truth.
+### 4. Dedicated OpenCode agent/profile
 
-## P1 — Safe execution substrate
+Preferir un agent OpenCode específico para Overmind con permisos deliberados en vez de dar a la integración autoridad ilimitada. Overmind controla el workspace autorizado; OpenCode controla sus acciones internas.
 
-### 4. RunState
+**Exit P0:** Overmind puede delegar una misión de software engineering y recibir un resultado bounded sin añadir nuevos subsistemas Core.
 
-Un active foreground execution por session inicialmente. Cancellation token común para model, Tool y child jobs.
+## P1 — Enriquecer solo si el uso lo demuestra
 
-### 5. ToolExecutionContext
+### 5. ACP client adapter
 
-Añadir ID, cancellation, metadata/progress y permission ask al executor, no a cada Tool por separado.
+Adoptar ACP cuando se necesiten uno o más de:
 
-### 6. PermissionService
+- session lifecycle estructurado;
+- resume/fork estable;
+- streaming de agent events;
+- cancelación;
+- permission request/reply;
+- mode/model control.
 
-Policy explícita allow/ask/deny con scopes. Diseñar sin necesidad de UI; `ask` puede ser port/handler y fallar cerrado si no existe interactive approver.
+`opencode acp` ya ofrece estas operaciones sobre stdio.
 
-### 7. Subagent child sessions
+### 6. Permission forwarding mínimo
 
-Primero foreground + depth=1 + explicit agent spec/model target/tool grants/budget. Después resume.
+Si OpenCode solicita una permission vía ACP, reenviarla a un approver explícito cuando exista. Sin approver, deny. No implementar un PermissionService universal hasta que otra capability de Overmind necesite la misma semántica.
 
-### 8. MutationJournal
+### 7. AgentDelegationPort — condicional
 
-Generalizar el rollback de Workspace y registrar mutaciones con before/after identity y reconciliation status.
+Promover la delegación a un port genérico **solo** cuando aparezca otro agent backend o un subagent nativo con operaciones realmente comunes.
 
-## P2 — Capability ecosystem
+## P2 — Capacidades propias de Overmind
 
-### 9. BackgroundJob/Service lifecycle
+Memory, RAG, Blackboard, MCP, EVENTS, SERVICES, WebUI, persistence y background deben evolucionar por sus propios contracts/requirements de Overmind.
 
-Después de event/persistence/cancel. No usar threads/sleep ad hoc por plugin.
+OpenCode puede aportar referencias de implementación, pero no cambia su prioridad automáticamente.
 
-### 10. MCP plugin
+## Triggers para extraer primitives genéricas
 
-TOOLS + CONTEXT + opcional SERVICE. Todas las operaciones externas pasan por PermissionService y cancellation.
+| Primitive | Implementar cuando... |
+|---|---|
+| EventPort | una capability real requiera observación/event facts compartidos, p.ej. Memory/WebUI/services |
+| SERVICES lifecycle | un plugin real necesite trabajo determinista persistente/largo, p.ej. ACP process persistente, watcher o MCP connection |
+| Session persistence | Overmind necesite resume durable, Memory raw transcript, multi-interface o crash recovery |
+| generic PermissionService | dos o más capabilities necesiten runtime approvals/policy común |
+| generic SubagentService | existan subagents Overmind o varios agent backends con semántica compartida |
+| BackgroundJob | una tarea de Overmind deba sobrevivir al model turn y entregar completion sin polling LLM |
+| MutationJournal | múltiples capabilities de Overmind necesiten reconciliation/revert común; no por las mutaciones internas de OpenCode |
+| RuntimeApiPort | exista una segunda interaction surface real, p.ej. WebUI |
 
-### 11. Skills
+## Coding-specific features que quedan fuera del roadmap Overmind
 
-Representar Skills principalmente como ContextContributors versionados, con loader Tool solo si hay valor en lazy activation.
+No hay fase para reconstruir:
 
-### 12. Runtime middleware tipado
+- shell/edit/patch/LSP;
+- Git session snapshots de coding;
+- coding prompts;
+- coding-specific tool routing;
+- OpenCode provider compatibility;
+- coding subagent topology.
 
-Solo donde un caso real lo exija. Preferir observers de FACT/SIGNAL sobre hooks que mutan data.
+Todo eso puede evolucionar dentro de OpenCode independientemente.
 
-## P3 — Remote surfaces
+## Resultado estratégico
 
-### 13. RuntimeApiPort
-
-Operaciones de session, execute/cancel, event subscription, permission reply, state/query.
-
-### 14. WebUI/HTTP
-
-Adapter sobre RuntimeApiPort.
-
-### 15. ACP
-
-Adapter de sessions/content/tool/permission/usage sobre el mismo runtime.
-
-## P4 — Optimizations/experiments
-
-- Code Mode si MCP/tool-call round trips se convierten en bottleneck medido.
-- smarter multi-model routing solo con evidencia; mantener target selection explícita como base.
-- richer scheduler solo cuando una capability real requiera periodicidad.
-
-## Dependencias que no deben invertirse
-
-`WebUI -> RuntimeApi -> Session/Events`, nunca `WebUI -> Agent`.
-
-`MCP -> public plugin ports`, nunca `Agent -> MCP internals`.
-
-`Persistence <- FACTs`, nunca `Persistence -> provider payload construction`.
-
-`Subagent -> ModelService`, nunca `Subagent -> backend`.
+Overmind gana capacidad de software engineering **sin aumentar proporcionalmente su Core ni su superficie de mantenimiento**.

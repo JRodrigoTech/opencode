@@ -1,83 +1,71 @@
-# Acceptance Gates
+# Acceptance Gates — OpenCode como capability, Overmind intacto
 
-Cada extracción desde OpenCode debería entrar solo con tests que demuestren que no rompe invariants de Overmind.
+## Core independence gate
+
+- quitar/deshabilitar `OpenCodePlugin` no cambia Agent algorithm.
+- Core no importa OpenCode/ACP types.
+- ToolRegistry sigue frozen después de READY.
+- ContextCompiler sigue siendo único owner de compiled model context.
+- ModelService no conoce el external agent.
+
+## Tool protocol gate
+
+- el modelo ve una Tool schema bounded de misión, no el catálogo interno OpenCode.
+- solo ToolCalls completas ejecutan delegación.
+- el resultado vuelve como ToolExecutionResult/ProtocolUnit normal.
+- raw stdout/events no se insertan automáticamente en future context.
+- output grande usa summary + references.
+
+## Scope/security gate
+
+- workspace/executable/config sensible se fija por Plugin/config, no por argumento arbitrario del modelo.
+- no `--auto`, `--yolo` o `--dangerously-skip-permissions` por defecto.
+- subprocess mismo usuario se documenta como no-sandbox.
+- secrets no aparecen en Tool result/context.
+- selected context compartido es explícito y bounded.
+
+## Failure gate
+
+- executable missing produce error normalizado.
+- process crash/timeout no bloquea indefinidamente Runtime.
+- malformed JSON/protocol falla explícitamente.
+- cancellation no causa automatic full-task retry.
+- outcome incierto tras posible side effect se marca como tal.
+
+## Session gate
+
+- external OpenCode session ID se trata como opaque reference.
+- resume no importa la transcript completa a Overmind.
+- session OpenCode no se confunde con canonical Overmind context/session identity.
+- follow-up puede reutilizar external session cuando el transport lo soporte.
+
+## Permission gate para ACP
+
+Cuando ACP sea usado:
+
+- permission request no se auto-aprueba sin policy explícita.
+- sin approver, deny/fail closed.
+- approved scope no se convierte automáticamente en grant permanente Overmind.
+- cancel usa protocol operation cuando sea posible.
+
+## Dedicated-agent gate
+
+- el profile OpenCode usado por Overmind tiene permisos documentados.
+- existe al menos una configuración read-only/plan o un rationale explícito si solo hay implement mode.
+- OpenCode puede usar sus subagents internamente sin surfaced de toda la child history.
 
 ## Context gate
 
-- provider messages siguen siendo compiled output.
-- round-trip persistence reconstruye canonical units.
-- required input no se trunca.
-- ProtocolUnits completas siguen atómicas.
-- Thinking no se reinserta automáticamente.
-- summary source filtering permanece estable.
+- Provider `messages[]` de Overmind siguen siendo compiled output.
+- OpenCode system prompts/reasoning/tool logs no se elevan a system/context authority.
+- DelegationResult se somete al mismo ContextCompiler que otras observations.
 
-## Events gate
+## Generalization gate
 
-- FACT stable ID.
-- deterministic sequence dentro de execution.
-- required sink failure bloquea dependent commit.
-- observer failure no reescribe FACT originario.
-- SIGNAL drop no cambia semantic result.
-- opaque reasoning nunca aparece en events públicos.
+No crear `AgentDelegationPort`, PermissionService, EventPort, SessionService o BackgroundJob solo para satisfacer un diagrama.
 
-## Persistence gate
+Una abstracción genérica entra cuando tiene consumidores reales y tests contractuales que demuestran semántica compartida.
 
-- restart/resume equivalence.
-- idempotent replay by EventId.
-- no Tool redispatch durante recovery.
-- schema version mismatch falla explícitamente.
-- secret/provider-private payloads no se almacenan accidentalmente.
+## Definition of done del primer spike
 
-## Tool/permission gate
-
-- registry permanece frozen después de READY.
-- capability visibility y invocation authorization testeadas por separado.
-- deny falla cerrado.
-- ask sin approver no auto-aprueba.
-- cancellation llega a ToolExecutor.
-- event metadata sigue bounded.
-
-## Subagent gate
-
-- child Session identity distinta.
-- depth limit.
-- explicit context seed.
-- explicit target/tool grants/budgets.
-- parent permissions no se heredan por accidente.
-- cancellation propagation.
-- child resume no duplica tool side effects.
-- parent recibe bounded result, no child history completa.
-
-## Background/services gate
-
-- no polling LLM.
-- no overlapping execution salvo contract explícito.
-- deterministic start/stop.
-- shutdown cancela o drena según policy.
-- completion FACT durable antes de cualquier optional wake.
-
-## MCP gate
-
-- Core no importa MCP internals.
-- remote tools pasan por PermissionService.
-- resource size/content bounded.
-- credentials no aparecen en events/context.
-- reconnect no duplica registered tools.
-
-## Interface gate
-
-- CLI/WebUI/ACP usan RuntimeApiPort.
-- disconnect no cancela semantic work salvo policy.
-- event reconnect puede replay FACTs desde cursor.
-- server auth no sustituye runtime permissions.
-
-## Model gate
-
-- backend específico no filtra wire types a Agent/Context.
-- retry/recovery separation preservada.
-- ModelCapabilities son explícitas.
-- ToolCall partial/truncated sigue fail-closed.
-
-## Definition of done
-
-Una feature extraída de OpenCode no está terminada cuando “funciona en demo”; está terminada cuando añade capacidad sin ampliar autoridad accidental, sin romper canonical Context y con lifecycle/persistence/cancellation observables cuando corresponda.
+La integración está bien diseñada si Overmind obtiene capacidad útil de coding con **una capability removible**, no si reproduce internamente la arquitectura de OpenCode.

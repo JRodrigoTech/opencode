@@ -23,27 +23,44 @@ La arquitectura OpenCode usada aquí es la auditada en `reverse-engineering/OPEN
 
 ## Autoridad de Overmind
 
-Para distinguir implementación de intención se respeta el propio orden de autoridad del proyecto:
+Se respeta el orden de autoridad definido por el propio proyecto:
 
 1. source activo y accepted tests;
-2. `AGENTIX/STATE.md` para estado resumido;
-3. `AGENTIX/CURRENT_RUNTIME_BASELINE.md` para invariants actuales;
-4. contracts especializados de `AGENTIX/*_ARCHITECTURE/` para target design;
-5. `FUTURE/`, rationale e implementation history solo como material no autoritativo cuando así se declara.
+2. `AGENTIX/STATE.md`;
+3. `AGENTIX/CURRENT_RUNTIME_BASELINE.md`;
+4. contracts especializados `AGENTIX/*_ARCHITECTURE/`;
+5. `FUTURE/`, rationale e implementation history según su status.
 
-## Método
+## Método revisado
 
-Cada recomendación se construyó cruzando:
+La comparación usa dos preguntas separadas:
 
-1. mecanismo equivalente en OpenCode production;
-2. implementación real de Overmind;
-3. contracts normativos o deferred boundaries ya definidos por Overmind;
-4. dependencia necesaria para introducirlo sin romper ownership.
+1. **¿Qué mecanismo demuestra OpenCode?** — hecho de reverse engineering.
+2. **¿Debe vivir ese mecanismo dentro de Overmind?** — decisión arquitectónica evaluada contra los principios y necesidades de Overmind.
 
-No se presenta como implementado nada que `STATE.md` marque deferred.
+Un mecanismo puede estar perfectamente implementado en OpenCode y aun así clasificarse como `DELEGATE`, `REFERENCE-ONLY` o `DO-NOT-COPY`.
+
+La segunda revisión verificó además surfaces que permiten usar OpenCode como agente externo:
+
+- `opencode run --format json` y session resume;
+- `opencode acp` sobre stdio;
+- ACP session/prompt/cancel operations;
+- ACP permission forwarding;
+- TaskTool/subagents internos.
+
+## Regla contra sesgo de feature parity
+
+No se recomienda una primitive Overmind porque aparezca en OpenCode. La recomendación requiere al menos una de estas condiciones:
+
+- ya existe una necesidad explícita en el roadmap/contracts de Overmind;
+- resuelve una necesidad observada en source actual;
+- es la primitive mínima necesaria para integrar una capability real;
+- su semántica debe ser gobernada universalmente por Core.
+
+En caso contrario se mantiene como referencia o dentro del agente externo.
 
 ## Límites
 
-Este trabajo es arquitectura/reverse engineering estático. No ejecuta la suite de Overmind ni proveedores live. Los tests documentados por Overmind se consideran evidencia del repository baseline, pero no fueron reejecutados desde esta conexión GitHub.
+Trabajo estático de arquitectura/reverse engineering. No se ejecutó la suite ni providers live desde esta conexión.
 
-Las propuestas son deliberadamente incrementales: la existencia de una solución en OpenCode no prueba que Overmind deba implementarla inmediatamente.
+La viabilidad de `run`/ACP se basa en source production y no equivale a una prueba end-to-end Overmind -> OpenCode. Esa integración debe validarse con un spike independiente antes de consolidar contratos.

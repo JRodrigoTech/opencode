@@ -1,70 +1,43 @@
-# Tool Execution Lifecycle
+# Tool Lifecycle — external agent como Tool de alto nivel
 
-**Status:** RECOMMENDED
+## Diseño actual suficiente para el MVP
 
-## Current gap
+Overmind ya ejecuta complete normalized ToolCalls a través de ToolPort/ToolRegistry y produce `ToolExecutionResult` que Agent incorpora como ProtocolUnit.
 
-`ToolRegistry.execute(call)` es deliberadamente pequeño: lookup, arguments validation, Tool.execute y normalized observation. Para un agente local es suficiente. Para permisos, streaming progress, cancellation, persistence y child tools conviene añadir un **ToolExecutor** alrededor, sin engordar ToolRegistry.
+Un agent externo puede encajar en ese contrato sin rediseñar Agent:
+
+```text
+model emits complete `agent.code` ToolCall
+   |
+   v
+ToolRegistry validation
+   |
+   v
+OpenCodeDelegateTool.execute
+   |
+   +-> spawn/ACP adapter
+   +-> consume external activity internally
+   +-> enforce timeout/cancel/policy
+   |
+   v
+bounded ToolExecutionResult
+   |
+   v
+atomic ProtocolUnit committed
+```
+
+## No remote-tool mirroring
+
+La Tool no debe exponer el catálogo interno de OpenCode. El external agent ejecuta su propio loop.
 
 ## ToolExecutionContext
 
-Propuesta:
+Un futuro `ToolExecutionContext` con cancellation/progress/events puede ser útil cuando varias Tools lo requieran. No es requisito previo para el spike si el adapter puede cumplir safely usando el contrato actual.
 
-```text
-ToolExecutionContext
-- session_id
-- execution_id
-- call_id
-- model_turn
-- cancellation
-- permission port
-- event emitter
-- metadata/progress reporter
-- capability grants
-```
+## Side effects inciertos
 
-No entregar Agent ni Runtime completos.
+Si se cancela o pierde conexión mientras OpenCode ejecuta una mutación, no retry automático de la misión completa. Marcar resultado indeterminado/failed y permitir reconcile/resume explícito.
 
-## Lifecycle
+## Result size
 
-```text
-model emits complete ToolCall
-       |
-       v
-validate protocol/arguments
-       |
-       v
-permission check
-       |
-       +-> denied -> ToolObservation(error)
-       |
-       v
-FACT/SIGNAL tool.started
-       |
-       v
-Tool.execute(context)
-       |
-       +-> progress SIGNALs
-       |
-       +-> side effect -> MutationJournal
-       |
-       v
-FACT tool.completed / tool.failed
-       |
-       v
-atomic ProtocolUnit committed by Agent
-```
-
-## Preserve atomicity
-
-El lifecycle externo no debe provocar que una tool truncada/parcial se ejecute. `Agent` sigue aceptando solo complete normalized ToolCalls del Model layer.
-
-## Hooks
-
-Antes de copiar `before/after` hooks de OpenCode, usar Event observers. Solo introducir un hook mutante si existe un caso concreto donde observation no basta.
-
-Ejemplo legítimo futuro: policy middleware que normaliza/redacta una outbound network request, con contrato explícito. No un hook global `on_anything`.
-
-## Metadata
-
-Overmind ya limita event metadata a 4096 bytes. Mantener bounded metadata y añadir referencias externas para outputs grandes si hace falta; no inflar FACTs con payload arbitrario.
+Resumen bounded en `content`; details grandes en metadata limitada o artifact/reference. No volcar stdout JSON completo en ProtocolUnit.

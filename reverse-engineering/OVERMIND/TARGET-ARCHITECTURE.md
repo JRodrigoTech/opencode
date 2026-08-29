@@ -1,102 +1,143 @@
-# Recommended Target Architecture
+# Target Architecture — composición con agentes especializados
 
-**Status:** RECOMMENDED — synthesis of VERIFIED-OVERMIND + VERIFIED-OPENCODE
+**Status:** RECOMMENDED, minimal-first
 
-## Target
+## Target inmediato
+
+El target no añade una copia del runtime de OpenCode alrededor del Core de Overmind. Añade una capability delegada dentro del Plugin/Tool model existente.
 
 ```text
-                         +----------------------+
-                         | CLI / WebUI / ACP    |
-                         | Runtime API adapters |
-                         +----------+-----------+
-                                    |
-                                    v
-                            +---------------+
-                            | SessionService|
-                            +--+---------+--+
-                               |         |
-                      +--------+         +--------+
-                      v                           v
-                RunState/Execution           Persistence
-                      |
-                      +---------------------> EventPort
-                      |
-                      v
-                   Agent
-          +-----------+------------+
-          |            |           |
-          v            v           v
- ContextCompiler  Capability   ModelService
-  canonical        Resolver         |
-  cognition           |             v
-                      |       GenerationExecutor
-                      v             |
-                 ToolExecutor       v
-                 /    |    \     ModelBackend
-                /     |     \
-        Permission  Journal  Plugin capability
-                            /        |       \
-                          MCP      Skills   Workspace
+                    OVERMIND
 
-SubagentService -> creates child SessionService execution -> same Core Agent contract
+Request -> Agent -> ContextCompiler -> ModelService
+            |
+            | complete ToolCall
+            v
+         ToolPort
+            |
+            +---------------- WorkspacePlugin (simple deterministic file tools)
+            |
+            +---------------- OpenCodePlugin
+                                  |
+                                  v
+                         OpenCodeDelegateTool
+                                  |
+                         transport adapter
+                       /                  \
+          MVP: `opencode run`       richer: ACP client
+                       \                  /
+                                  v
+                          OPENCODE PROCESS
+                    coding session / coding agent
+                      /      |       |       \
+                  tools   permissions Git   subagents
+                                  |
+                                  v
+                         DelegationResult
+                                  |
+                                  v
+                       Overmind ProtocolUnit
 ```
 
 ## Ownership
 
-### Agent
+### Overmind Agent
 
-Sigue poseyendo el cognitive loop: model turn, Tool protocol atomicity y decisión de completar/continuar/fallar.
+Posee la decisión cognitiva de delegar y el Tool protocol. No conoce OpenCode sessions, providers o tools internas.
 
 ### ContextCompiler
 
-Sigue siendo el único owner de assembly/attention/budget/compaction. No consulta una DB para decidir arbitrariamente qué contexto usar: recibe ContextUnits y ContextContributors según contratos explícitos.
+Sigue poseyendo todo el contexto de Overmind. Una delegación es una observation/protocol result más, no una puerta para insertar la transcript externa completa.
 
-### SessionService
+### OpenCodePlugin
 
-Nuevo outer boundary. Posee identity, parent/child link, lifecycle y recuperación de session state. No conoce provider payloads.
+Posee configuración y disponibilidad de la capability `opencode`. Puede registrar una Tool de alto nivel. El Core no importa OpenCode.
 
-### Execution / RunState
+### OpenCode adapter
 
-Posee active run, cancellation, state transitions y exclusión/parallelism permitido. Hace observable `idle/running/cancelling/failed/completed` sin entrar en semántica cognitiva.
+Posee process invocation/protocol translation. Convierte un `DelegationInput` a una misión OpenCode y normaliza el resultado. Los IDs de sesión OpenCode permanecen opaque fuera de este boundary.
 
-### EventPort
+### OpenCode
 
-Implementa el diseño FACT/SIGNAL ya definido por Overmind. La lección de OpenCode es producir eventos desde commit boundaries, no reconstruirlos desde logs.
+Posee completamente su runtime de software engineering: agents, prompts, tools, permissions, subagents, provider stack, snapshots y coding state.
 
-### Persistence
-
-Required sink para FACTs que deban ser durables. Guarda records versionados e idempotentes. Nunca transforma hechos para decidir Agent behavior.
-
-### CapabilityResolver
-
-Separa *registered capability* de *visible capability in this execution*. Inputs explícitos: agent/profile, target/model capabilities, permissions, client/runtime surface y session policy.
-
-### ToolExecutor
-
-Convierte Tool calls en lifecycle observable y autorizado. El ToolRegistry permanece frozen y simple.
-
-### PermissionService
-
-Policy runtime independiente del Plugin construction grant. Construction grants controlan qué puede recibir un plugin; PermissionService controla acciones concretas del agente/usuario.
-
-### MutationJournal
-
-Generaliza reversibilidad de Workspace a un contrato de side effects, sin asumir Git como Core dependency.
-
-## Invariant crítico
+## Contrato mínimo
 
 ```text
-Persisted session facts
-      |
-      +----> audit / UI / resume / events
-      |
-      +----> reconstruction of canonical ContextUnits
-                    |
-                    v
-              ContextCompiler
-                    |
-                    v
-              provider messages[]
+DelegationInput
+- task: str
+- capability/profile: optional
+- workspace scope: configured, not arbitrary by default
+- external_session_id?: str
+- selected context/artifact refs?: bounded
+
+DelegationResult
+- ok/status
+- summary
+- external_session_id
+- changed/artifact refs when available
+- verification/test summary when available
+- bounded metadata/error
 ```
 
-No debe existir el atajo `DB messages[] -> provider` como autoridad cognitiva.
+La primera versión puede modelarse directamente como una Tool. No necesita un nuevo Core port.
+
+## Evolución opcional a AgentDelegationPort
+
+Solo cuando exista un segundo backend de agentes o semántica común real:
+
+```text
+AgentDelegationPort
+        |
+        +-- OpenCodeAgentAdapter
+        +-- LocalOvermindSubagentAdapter
+        +-- OtherExternalAgentAdapter
+```
+
+Entonces se pueden estabilizar operaciones como `delegate`, `resume`, `cancel` y eventualmente background. Hasta ese momento, mantenerlas plugin-local reduce superficie y evita diseñar un framework hipotético.
+
+## Subagente Overmind != agente OpenCode
+
+Un futuro subagente nativo de Overmind puede usar el mismo Core cognitivo con context seed/budgets propios. Eso no significa que todas las especialidades deban implementarse como subagentes nativos.
+
+Para coding:
+
+```text
+Overmind
+  -> external OpenCode coding agent
+       -> OpenCode internal explore/general/... subagents
+```
+
+Para una futura capacidad cognitiva propia de Overmind:
+
+```text
+Overmind
+  -> local Overmind subagent
+```
+
+Ambos pueden converger detrás de un contrato de delegación **solo si esa convergencia aporta valor real**.
+
+## Permission boundary
+
+```text
+Overmind outer policy
+- may delegate to opencode?
+- workspace/profile allowed?
+- data allowed to leave parent context?
+        |
+        v
+OpenCode inner policy
+- read/edit/shell/web permissions
+- subagent permissions
+- external directory rules
+```
+
+No copiar el permission engine de OpenCode para esta integración.
+
+## Persistence
+
+Para el MVP basta devolver `external_session_id` en la Tool observation. Si después Overmind implementa persistence por Memory/WebUI/resume general, puede persistir un `DelegationRecord` con esa referencia opaque. No almacenar la transcript OpenCode como canonical Overmind memory.
+
+## Independence invariant
+
+`OpenCodePlugin` eliminado => desaparece la capacidad especializada de coding, pero el resto de Overmind continúa funcionando sin cambios en Core.

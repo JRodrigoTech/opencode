@@ -1,75 +1,64 @@
-# Capability Resolution and Runtime Permissions
+# Capability Resolution and Permissions — mantener dos niveles
 
-## Current Overmind
+## Overmind actual
 
-**VERIFIED-OVERMIND:** ToolRegistry es frozen y Plugin construction grants son explícitos. Workspace limita filesystem scope. No existe todavía un general runtime permission broker.
+ToolRegistry es frozen; Plugin composition usa grants explícitos; Workspace limita su scope. No existe general runtime permission broker.
 
-## OpenCode lesson
+No hace falta introducirlo únicamente para delegar coding a OpenCode.
 
-OpenCode separa dos preguntas:
+## OpenCode integration
 
-1. qué tool/capability ve el modelo;
-2. si una invocación concreta está autorizada.
-
-Esta separación es esencial cuando lleguen shell, MCP, browser, GitHub, subagents y external services.
-
-## Diseño recomendado
-
-### ToolRegistry
-
-Mantenerlo casi como está: registro estático y frozen.
-
-### CapabilityResolver
-
-Nuevo pure/policy component por execution:
+La capability se puede registrar como una única Tool con configuración/grant estático:
 
 ```text
-registered tools
-+ agent/profile grants
-+ target/model capabilities
-+ session policy
-+ interaction surface capabilities
- -> visible ToolSchemas
+OpenCodePlugin
+- executable/transport
+- workspace_root
+- allowed profiles
+- timeout/budget config
+ -> registers agent.code
 ```
 
-No muta registry.
+El modelo no recibe autoridad para cambiar arbitrary executable/root/policy.
 
-### PermissionService
+## Dos permission domains
 
-Evalúa la acción concreta:
+### Outer Overmind policy
+
+Controla:
+
+- si `agent.code` está visible;
+- si la invocation está permitida bajo los grants del Plugin/session;
+- qué workspace/data puede cruzar el boundary.
+
+Con el runtime actual, gran parte de esta policy puede quedar fija por composition/configuración.
+
+### Inner OpenCode policy
+
+Controla acciones concretas del coding agent:
+
+- read/edit;
+- shell;
+- web;
+- external directories;
+- subagents.
+
+No duplicar esas reglas en Overmind.
+
+## ACP permission forwarding
+
+Cuando el adapter use ACP, `requestPermission` puede surfaced a un approver del producto. OpenCode production rechaza si ese handler no existe, una semántica fail-closed que conviene conservar.
+
+## Cuándo crear PermissionService genérico
+
+Solo si múltiples capabilities Overmind requieren `ALLOW | ASK | DENY` runtime con el mismo lifecycle — por ejemplo browser + MCP + external agent + filesystem mutations.
+
+Entonces extraer una policy neutral. No copiar necesariamente la precedence exacta `findLast` de OpenCode.
+
+## Invariant
 
 ```text
-permission key + resource pattern + execution context
- -> ALLOW | ASK | DENY
+Plugin construction grant != external agent inner permission
 ```
 
-Ejemplos:
-
-- `workspace.read:path`
-- `workspace.write:path`
-- `process.exec:command-class`
-- `mcp.server.tool:server/tool`
-- `subagent.spawn:profile`
-- `network.fetch:host`
-
-## ASK
-
-`ASK` requiere un `PermissionApproverPort` suministrado por surface (CLI/WebUI/ACP). Sin approver, comportamiento seguro = deny explícito, no auto-allow.
-
-Replies posibles inicialmente:
-
-- once;
-- session;
-- deny.
-
-Persistir approvals solo si el producto necesita policy durable; no mezclar eso con Plugin construction grants.
-
-## Precedence
-
-Evitar reglas mágicas difíciles de auditar. Si se adopta wildcard precedence, documentarla y probarla exhaustivamente. Una opción más simple para Overmind es deny-overrides + specificity explícita; la semántica importa más que copiar `findLast` de OpenCode.
-
-## Security invariant
-
-Plugin grant != model permission.
-
-Un MCP plugin puede recibir internamente un client/process grant para funcionar y, aun así, cada tool external puede requerir PermissionService antes de ejecutarse.
+Tener permiso para arrancar el agente OpenCode no significa aprobar automáticamente cada mutación que éste solicite.

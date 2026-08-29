@@ -1,67 +1,73 @@
 # OpenCode -> Overmind Extraction Matrix
 
-## Matriz ejecutiva
+## Leyenda
 
-| Mecanismo OpenCode | Overmind hoy | Decisión | Prioridad |
-|---|---|---|---|
-| Persistent Session identity | Agent in-memory `_units` | ADAPTAR | P0 |
-| Normalized runtime event stream | callbacks + result records; EVENTS deferred | ADAPTAR | P0 |
-| RunState / cancellation domain | request-local cancellation | ADAPTAR | P0/P1 |
-| Tool execution context | ToolPort simple | ADAPTAR | P1 |
-| General Permission engine | construction grants + confinement | ADAPTAR, separado de registry | P1 |
-| Child sessions for subagents | deferred contract | ADAPTAR | P1 |
-| Background jobs | deferred operational runtime | ADAPTAR tras child sessions | P1/P2 |
-| Snapshots/patch/revert | Workspace recovery específica | GENERALIZAR | P1/P2 |
-| MCP | future plugin | ADAPTAR como Plugin | P2 |
-| Skills | no capability equivalente genérica | ADAPTAR a CONTEXT/TOOLS | P2 |
-| Plugin interceptive hooks | composition-only, contracts restrictivos | SOLO hooks tipados mínimos | P2 |
-| ACP | no Runtime API todavía | DEFER hasta sessions/events | P2/P3 |
-| HTTP server/generated clients | WebUI deferred | DEFER | P3 |
-| Large provider registry | explicit ModelTarget mapping | NO COPIAR ahora | — |
-| AI SDK/native dual runtime | clean Python ModelBackend seam | NO copiar estructura; sí event vocabulary | — |
-| Effect Layers | Python composition root | NO COPIAR | — |
-| messages+parts as session history | canonical ContextUnits separados | NO convertir en Context authority | — |
-| model-ID tool hacks | canonical tools | NO COPIAR | — |
+- **PRESERVE** — Overmind ya posee el boundary adecuado.
+- **DELEGATE** — mantener la capacidad en OpenCode y consumirla desde Overmind.
+- **ADAPT IF NEEDED** — extraer solo la primitive genérica cuando exista requisito real.
+- **REFERENCE / DEFER** — estudiar, no implementar ahora.
+- **REJECT** — copiarlo degradaría Overmind.
 
-## P0 — Operational identity before features
+## Matriz
 
-El requisito transversal para Memory, WebUI, subagents, background work y durable EVENTS es poder identificar:
+| Mecanismo OpenCode | Decisión para Overmind | Motivo |
+|---|---|---|
+| `build` / `plan` / `explore` coding agents | **DELEGATE** | Son perfiles especializados de software engineering; Overmind puede invocarlos. |
+| `TaskTool` + subagents de OpenCode | **DELEGATE** | Permitir que el coding agent organice su propia exploración/implementación; no replicar la jerarquía. |
+| shell/bash | **DELEGATE** para coding | Mantener ejecución de comandos compleja dentro del boundary especializado. |
+| read/edit/write/apply_patch | **DELEGATE** para coding | Overmind conserva Workspace Tools simples; no necesita duplicar el editor de OpenCode. |
+| grep/glob/code search/LSP | **DELEGATE** | Infraestructura específica de codebase. |
+| Code Mode | **DELEGATE / REFERENCE** | Si aporta valor, que lo use OpenCode internamente; no es una primitive cognitiva universal. |
+| Git snapshots/revert de coding | **DELEGATE** | OpenCode puede poseer reversibilidad de su sesión; no obliga a un MutationJournal Core. |
+| project instructions / AGENTS / CLAUDE para coding | **DELEGATE** | OpenCode puede interpretar instrucciones del repo; Overmind no necesita duplicar ese discovery. |
+| `opencode run --format json` | **ADAPT NOW** | Boundary mínimo para una Tool de coding sin nuevos subsistemas Core. |
+| `opencode acp` | **ADAPT WHEN RICH LIFECYCLE IS NEEDED** | Excelente transporte para external-agent sessions, permission forwarding, resume/cancel. |
+| OpenCode ACP server internals | **DELEGATE** | El adapter consume el protocolo; no copia su implementación. |
+| ACP server para exponer Overmind | **REFERENCE / DEFER** | Es otra dirección del protocolo; esperar Runtime API real. |
+| external agent session ID | **ADAPT MINIMALLY** | Tratarlo inicialmente como opaque delegation reference; no obliga a SessionService propio. |
+| parent/child Session domain | **REFERENCE / ADAPT IF NEEDED** | Útil si Overmind implementa subagents generales; no necesario para delegar coding. |
+| BackgroundJob | **REFERENCE / ADAPT IF NEEDED** | OpenCode ya puede hacer background/subagents internos; Overmind solo necesita su propio background si hay un caso general. |
+| Permission engine `allow/ask/deny` | **REFERENCE** | Mantener outer grant + inner OpenCode policy; genericizar solo con una necesidad transversal real. |
+| normalized LLM events | **REFERENCE / ADAPT IF NEEDED** | Útil para UI/observability futura, no requisito para integrar coding. |
+| Session persistence | **REFERENCE / ADAPT IF NEEDED** | Overmind necesitará persistence por sus propios objetivos, no para imitar OpenCode. |
+| Event stream / reducer | **REFERENCE / ADAPT IF NEEDED** | Adoptar solo cuando WebUI/services/background requieran un event contract general. |
+| MCP | **INDEPENDENT OVERMIND CAPABILITY** | Si Overmind necesita MCP, implementarlo como Plugin según sus contracts; no copiarlo porque OpenCode lo tenga. |
+| Skills | **PRESERVE OVERMIND DESIGN** | Encajan mejor como ContextContributors/TOOLS bounded que como prompt mutation. |
+| plugin before/after hooks | **REJECT GENERAL HOOK SURFACE** | Preservar public ports; typed middleware solo con caso probado. |
+| provider registry + provider transforms | **REJECT FOR OVERMIND CORE** | OpenCode mantiene sus providers; Overmind ya posee ModelBackend seam. |
+| AI SDK/native dual runtime | **REJECT STRUCTURE** | No aporta valor al stack Python de Overmind. |
+| Effect Layers | **REJECT** | Tecnología específica del runtime TypeScript. |
+| model-name tool heuristics | **REJECT** | Preferir capabilities explícitas. |
+| messages/parts como source primario de sesión | **REJECT COMO CONTEXT AUTHORITY** | Overmind conserva canonical ContextUnits. |
+| HTTP server/generated clients | **REFERENCE / DEFER** | Solo cuando una interface remota de Overmind lo necesite. |
 
-- session;
-- request/execution;
-- model turn;
-- tool call;
-- runtime event;
-- child execution.
+## Qué sí se extrae inmediatamente
 
-Overmind ya tiene `request_id` y `turn_number`, pero son identidad local del Agent. La primera extracción útil es promover identity a contratos runtime estables sin alterar ContextUnit semantics.
+La extracción inmediata útil es pequeña:
 
-## P1 — Safe action runtime
+1. **delegation as a high-level Tool**;
+2. **opaque external session reference** para reanudar cuando sea útil;
+3. **bounded result contract**;
+4. **safe subprocess/ACP boundary**;
+5. **separación entre outer delegation policy e inner coding permissions**.
 
-Después de identity/persistence/event ordering:
+El resto de la sofisticación de OpenCode puede permanecer detrás del adapter.
 
-1. ToolExecutionContext.
-2. PermissionService allow/ask/deny.
-3. RunState/cancel tree.
-4. Child sessions.
-5. Mutation journal.
+## Qué ya tiene Overmind y no debe rehacerse
 
-Esta fase convierte Overmind de un agente local con Tools en un runtime capaz de alojar acciones externas, múltiples clientes y delegación segura.
+- ContextCompiler y budgeting.
+- canonical ContextUnits/ProtocolUnits.
+- ModelService/GenerationExecutor.
+- ToolRegistry frozen.
+- Plugin staging/validation/freeze.
+- Workspace confinement/recovery.
+- retry/recovery separation.
 
-## P2 — Extensibility
-
-MCP, Skills, background services y typed event observers deben construirse sobre los contratos anteriores. De otro modo cada capability inventará su propia identidad, auth, cancellation y telemetry.
-
-## P3 — Interfaces
-
-ACP/HTTP/WebUI deben ser adapters sobre SessionService + EventPort + RuntimeApi. No deberían llamar a Agent internals.
-
-## Diferencia fundamental
-
-OpenCode tiende a usar Session messages/parts como historia persistente y material para el modelo. Overmind debe mantener dos conceptos:
+## Regla final
 
 ```text
-Durable execution record != compiled cognitive context
+Universal mechanism needed by Overmind -> adapt minimally
+Domain-specialized coding behavior      -> delegate to OpenCode
+Existing Overmind invariant             -> preserve
+OpenCode complexity without requirement -> defer/reject
 ```
-
-Persistence registra lo ocurrido. ContextCompiler decide lo relevante para pensar ahora.

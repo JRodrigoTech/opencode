@@ -1,109 +1,86 @@
-# Overmind Current State
+# Overmind Current State y frontera con OpenCode
 
-**Status:** VERIFIED-OVERMIND
+**Status:** VERIFIED-OVERMIND + architectural interpretation
 
-## Qué es Overmind
+## Qué es Overmind hoy
 
-Overmind se define como un **modular cognitive runtime built around a small, explicit AI Core**. El LLM es un reasoning engine, no el propietario del sistema. Esta diferencia debe gobernar cualquier importación de ideas desde OpenCode.
-
-## Runtime implementado
+Overmind se presenta como **a modular cognitive runtime built around a small, explicit AI Core**. El LLM es un reasoning engine dentro de un sistema mayor; Core posee contexto, model execution, Tool protocol y runtime boundaries.
 
 El camino actual es:
 
 ```text
 CLI / caller
     |
-    v
- Runtime (READY boundary)
+ Runtime READY boundary
     |
-    v
  Agent
-    |
     +-> ContextCompiler -> CompiledContext
-    |
     +-> ModelService -> GenerationExecutor -> ModelTarget -> OpenRouterBackend
-    |
-    +-> ToolPort / ToolRegistry -> Tool
+    +-> ToolPort / frozen ToolRegistry -> Tool
 ```
 
-`Agent` mantiene en memoria `_units` con `UserUnit | AssistantUnit | ProtocolUnit`. Cada request incrementa `request_id`, compila contexto y ejecuta hasta `max_model_turns`.
+`Agent` mantiene canonical `UserUnit | AssistantUnit | ProtocolUnit` en memoria y ejecuta bounded model turns.
 
-## Context
+## Context actual
 
-El Core implementa:
+`ContextContributor -> ContextBlock -> ContextFrame -> ContextCompiler -> CompiledContext` es una decisión fundacional.
 
-```text
-ContextContributor
- -> ContextBlock[]
- -> ContextFrame
- -> ContextCompiler
- -> CompiledContext
- -> ModelService
-```
+- provider `messages[]` es output de compilación;
+- Tool exchanges completas son ProtocolUnits;
+- token accounting/compaction pertenecen a Context;
+- provider Thinking no se convierte automáticamente en input futuro.
 
-Propiedades importantes:
+OpenCode no debe cambiar este ownership.
 
-- `messages[]` es transport output, no memoria canónica.
-- Current user, first-user anchor, required blocks y ProtocolUnits completos tienen garantías explícitas.
-- Token accounting es tokenizer-aware.
-- Compaction histórica es bounded y puede activarse automáticamente, manualmente o vía tool `context.compact`.
-- Sources ya compactadas permanecen en Agent state para auditabilidad pero dejan de reenviarse al provider.
+## Model execution actual
 
-## Model execution
+`ModelService -> GenerationExecutor -> ModelBackend` ya separa:
 
-`ModelService` usa mapping explícito de targets y exige `primary`. `GenerationExecutor` es el único cross-attempt loop.
-
-Overmind ya separa correctamente:
-
-- physical backend invocation;
+- target/model resolution explícito;
+- physical invocation;
 - technical retry;
-- normalized-response recovery/continuation;
-- provider Thinking;
-- authoritative Usage;
-- continuation preflight.
+- normalized response recovery/continuation;
+- usage/timing;
+- provider-specific backend behavior.
 
-Esta separación es superior a copiar un provider registry complejo antes de necesitarlo.
+Un OpenCode agent delegado **no es un ModelBackend**. Es una capability de nivel superior que ejecuta una misión completa con su propio model/tool loop.
 
-## Tools
+## Tools y Workspace
 
-`ToolRegistry`:
+Overmind ya dispone de ToolRegistry frozen y una WorkspacePlugin con cinco operations bounded: list, search, read, write y delete, con recovery para mutaciones.
 
-- exige canonical names `namespace.name`;
-- valida schemas;
-- reserva `context.compact` para Core;
-- devuelve defensive schema copies;
-- congela registration después de composition;
-- ejecuta calls completos y produce `ToolExecutionResult` con observation/content/metadata bounded.
+Estas Tools son útiles para acciones deterministas pequeñas. No implican que WorkspacePlugin deba evolucionar hasta convertirse en un IDE/coding agent.
 
-El Workspace plugin aporta actualmente cinco Workspace Tools; existen además tres Tools read-only de bootstrap.
+Para tareas como comprender una codebase grande, planificar un refactor, editar múltiples archivos, ejecutar tests iterativamente o usar LSP/subagents, OpenCode es un mejor boundary especializado.
 
 ## Plugins
 
-`PluginComposer` hace stage -> validate -> commit -> freeze de TOOLS y CONTEXT. Los contracts target restringen plugins a public Core ports y categorías:
+La implementación actual de Plugins soporta TOOLS y CONTEXT mediante stage -> validate -> commit -> freeze. EVENTS y SERVICES están todavía deferred.
 
-- TOOLS
-- CONTEXT
-- EVENTS (deferred)
-- SERVICES (deferred)
+Esto favorece un MVP muy pequeño para OpenCode: un Plugin puede aportar una Tool que invoque un proceso externo de forma scoped. No es necesario implementar primero todo SERVICES/EventBus/persistence.
 
-El modelo de grants es explícito y no entrega el runtime completo al plugin.
+Un proceso ACP persistente sí podría convertirse más adelante en un caso real que justificase SERVICES lifecycle.
 
-## No implementado todavía
+## Deferred en Overmind
 
-Según `AGENTIX/STATE.md`, permanecen deferred:
+Siguen deferred, entre otros:
 
+- Memory/RAG/Blackboard;
 - persistent storage;
-- Memory;
-- RAG;
-- Blackboard;
-- EVENTS ejecutable;
-- SERVICES ejecutable;
-- Runtime API;
-- subagents;
+- executable EVENTS/SERVICES;
+- Runtime API/WebUI;
 - MCP;
+- subagents nativos;
 - scheduler/background attention;
-- WebUI.
+- additional model backends/routing.
 
-## Implicación para esta comparación
+La existencia de equivalentes en OpenCode no altera automáticamente ese estado.
 
-Las siguientes fases de Overmind ya no necesitan rediseñar su Core cognitivo para parecerse a OpenCode. Necesitan añadir un **operational shell** alrededor de ese Core: sessions, events, persistence, permissions, child execution y adapters externos.
+## Nueva implicación de este estudio
+
+El valor inmediato de OpenCode para Overmind es doble:
+
+1. **specialized capability**: usar OpenCode directamente para software engineering;
+2. **reference implementation**: consultar sus soluciones maduras cuando una futura capability general de Overmind necesite sessions, permissions, cancellation, events o adapters.
+
+No se recomienda construir un “operational shell estilo OpenCode” como objetivo independiente.

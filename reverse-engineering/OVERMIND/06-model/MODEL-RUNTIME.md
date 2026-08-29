@@ -1,8 +1,8 @@
-# Model Runtime Lessons
+# Model Runtime — separar cognition propia de agent capability externa
 
 ## Preserve Overmind ModelService
 
-Overmind ya tiene un boundary fuerte:
+Overmind ya posee:
 
 ```text
 ModelService
@@ -11,56 +11,53 @@ ModelService
  -> ModelBackend
 ```
 
-`GenerationExecutor` diferencia technical retry y semantic recovery. `ModelService.generate_internal` limita tools y budgets para cognition interna. Mantenerlo.
+Este boundary gobierna las inferencias de **Overmind**. Debe permanecer provider-neutral y conservar retry/recovery/continuation semantics actuales.
 
-## Qué extraer de OpenCode
+## OpenCode no es un ModelBackend
 
-### Normalized event vocabulary
+Un agente OpenCode delegado realiza múltiples inferencias, Tool calls, edits, shell commands y subagent work. Por tanto no representa una llamada de modelo normalizable como `ModelBackend.generate()`.
 
-OpenCode logra que AI SDK y native runtime terminen en `LLMEvent`. Overmind tiene callbacks + normalized generation result. Para EventPort/UI/background conviene formalizar un vocabulary interno independiente del backend:
+La relación correcta es:
 
 ```text
-ModelEvent
-- activity
-- thinking_start/delta/end
-- content_start/delta/end
-- tool_call_complete
-- usage/final
-- provider_failure
+Overmind ModelService -> cognition del parent
+Overmind ToolPort      -> OpenCode agent mission
+OpenCode provider stack -> cognition interna del coding agent
 ```
 
-No todos son public Runtime Events; un adapter puede convertir ModelEvent -> SIGNAL/FACT.
+No mezclar los dos runtimes de modelos.
 
-### Provider adapters isolate wire quirks
+## Provider ownership
 
-Cuando se añada otro backend, mantener toda autenticación/payload/SSE/tool-call assembly/provider error mapping en `models/backends/<id>/`, como OpenRouter hace hoy.
+OpenCode conserva su provider registry, auth, transforms, native/SDK runtime y model quirks. Overmind no obtiene valor copiándolos si solo consume el resultado de la misión.
 
-### ModelCapabilities over model-name heuristics
+Si Overmind necesita un backend adicional para **su propia cognition**, se implementa bajo `overmind/models/backends/<id>/` según el contract de Overmind.
 
-Añadir features por declared capabilities, no por `if "gpt" in model_id`.
+## Target selection
 
-Capabilities futuras:
+Un eventual `agent.code` puede tener una configuración de OpenCode agent/model externa, pero no debe usar `ModelService` de Overmind para seleccionar cada model turn interno del coding agent.
 
-- tools;
-- streaming;
-- textual thinking;
-- structured output;
-- context/output maxima;
-- continuation support;
-- image/file input;
-- prompt caching if semantics matter.
+Es posible permitir un profile bounded como `inspect|plan|implement`; el adapter/config traduce ese profile a la configuración OpenCode apropiada.
 
-## Multi-target routing
+## Events
 
-Overmind ya permite named targets por mapping. La evolución recomendada es:
+OpenCode normaliza sus propios model/runtime events. El adapter puede consumirlos para progreso, pero no necesita convertirlos uno-a-uno a `ModelEvent` Overmind.
 
-1. explicit caller-selected `target_id`;
-2. subagent spec target;
-3. optional deterministic policy router;
-4. cognitive/automatic routing solo si una necesidad medida lo justifica.
+Cuando Overmind formalice EVENTS, conviene surfaced solo semántica de delegación:
 
-No introducir provider registry o fallback graph global antes de estos pasos.
+```text
+delegation.progress
+delegation.permission_waiting
+delegation.completed
+```
+
+No `provider-token-delta-from-child-agent` salvo una UX específica que realmente lo necesite.
 
 ## Usage/cost
 
-Overmind ya conserva Usage por physical response y aggregates logical generation. Si aparecen priced backends, añadir cost como normalized accounting derivado de authoritative usage/model pricing, no mezclarlo con Context token prediction.
+Mantener accounting separado:
+
+- Overmind model usage pertenece a ModelService/GenerationExecutor.
+- OpenCode mission usage, si se expone, pertenece a DelegationResult metadata/telemetry.
+
+No agregar ambos como si fueran un único provider call.

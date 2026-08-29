@@ -1,73 +1,52 @@
-# Runtime API, ACP and Server
+# ACP tiene dos direcciones distintas
 
-## Dependency order
+## 1. Overmind como ACP client de OpenCode
 
-No empezar por HTTP. La API estable debe emerger después de Session + RunState + EventPort.
+**Puede ser útil temprano.**
+
+OpenCode production ofrece `opencode acp`, un server ACP por stdio. Un `OpenCodeAgentAdapter` dentro de un Plugin Overmind puede actuar como client y consumir:
+
+- session lifecycle;
+- prompt;
+- resume/fork;
+- cancel;
+- permission request/reply;
+- agent events;
+- model/mode config.
+
+Este ACP es **transport interno de una capability**. Agent/Core de Overmind no tiene por qué conocerlo.
 
 ```text
-Agent/Core
-   ^
-Session/Execution runtime
+Overmind Tool
+ -> OpenCodeAgentAdapter
+ -> ACP client
+ -> `opencode acp`
+```
+
+## 2. Overmind como ACP server
+
+**Sigue deferred.**
+
+Exponer Overmind a editores/clientes ACP requiere una Runtime API estable de Overmind y mapping de sus propias session/content/tool/permission/event semantics.
+
+No confundir ese trabajo con usar OpenCode como backend.
+
+## RuntimeApiPort
+
+Implementarlo solo cuando exista una second surface real (WebUI, ACP server, remote client) o operations cross-caller que lo exijan.
+
+Entonces:
+
+```text
+Overmind Core/Runtime
    ^
 RuntimeApiPort
    ^
-+------+-------+------+
-| CLI  | WebUI | ACP  |
-+------+-------+------+
+CLI / WebUI / ACP-server adapters
 ```
 
-## RuntimeApiPort mínimo
-
-Operaciones candidatas:
-
-```text
-create_session
-get_session
-list_sessions
-execute
-cancel_execution
-get_execution
-subscribe_events
-reply_permission
-compact_context
-reset/new conversation
-spawn_child (possibly internal first)
-```
-
-Interfaces no reciben Agent object.
-
-## OpenCode server lesson
-
-OpenCode separa authoritative HTTP contract, host integration y generated clients. Para Overmind esto solo merece la complejidad cuando exista WebUI/remote client real.
-
-MVP:
-
-- typed Python RuntimeApiPort;
-- in-process CLI adapter;
-- tests contractuales.
-
-Luego HTTP adapter.
-
-## ACP
-
-OpenCode demuestra que ACP debe ser un mapper explícito de:
-
-- protocol session <-> runtime Session;
-- content <-> canonical/public transcript forms;
-- Tool state;
-- permission request/reply;
-- usage;
-- events.
-
-No adaptar ACP directamente a ModelService ni ToolRegistry.
-
-## Event subscription
-
-WebUI/ACP necesitan cursor/reconnect. Stable Event IDs + sequence permiten replay de FACTs; SIGNALs pueden perderse y no requieren historical replay salvo UX específica.
+La OpenCode capability puede seguir siendo un Plugin detrás de ese runtime.
 
 ## Security
 
-External server authentication y runtime PermissionService son capas distintas:
-
-- server auth: quién puede llamar a Overmind;
-- runtime permission: qué acción puede ejecutar el agent en una Session.
+Transport authentication y capability permission siguen separados. Del mismo modo, la seguridad del proceso OpenCode no se obtiene simplemente por usar ACP sobre stdio.

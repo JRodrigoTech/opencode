@@ -1,87 +1,54 @@
-# Runtime Events, RunState and Cancellation
+# Runtime Events, RunState and Cancellation — extracción condicionada
 
-**Status:** RECOMMENDED; aligns with Overmind normative deferred EVENTS contract
+**Status:** REFERENCE / ADAPT WHEN OVERMIND NEEDS IT
 
-## FACT vs SIGNAL debe mantenerse
+## FACT/SIGNAL sigue siendo buen diseño
 
-Overmind ya define correctamente:
+Overmind ya tiene un contract deferred sólido:
 
-- **FACT**: hecho committed con stable event ID.
-- **SIGNAL**: progreso efímero que puede perderse sin cambiar corrección.
+- FACT = hecho committed con stable ID;
+- SIGNAL = progreso efímero.
 
-OpenCode demuestra por qué esta distinción importa: streams del provider, tool states, permission requests y session updates necesitan orden observable, pero no todos son durable state.
+OpenCode confirma el valor de esta distinción, pero la integración inicial con OpenCode no exige implementar un EventPort global.
 
-## Event vocabulary propuesto
+La Tool puede ejecutar una misión, consumir internamente el stream OpenCode y devolver un resultado final bounded.
+
+## Cuándo promover EVENTS
+
+Implementar EVENTS cuando una capability real de Overmind necesite un canal compartido, por ejemplo:
+
+- WebUI streaming/reconnect;
+- Memory ingestion de hechos committed;
+- deterministic watchers/services;
+- background work propio;
+- auditabilidad cross-plugin.
+
+## Delegation events futuros
+
+Cuando EventPort exista, una external-agent capability puede mapear:
 
 ### FACT
 
 ```text
-session.created
-execution.started
-user.unit.committed
-context.compaction.committed
-model.turn.completed
-tool.call.committed
-tool.completed
-tool.failed
-mutation.committed
-assistant.thinking.committed
-assistant.unit.committed
-execution.completed
-execution.failed
-execution.cancelled
-child.created
-child.completed
+delegation.started
+delegation.completed
+delegation.failed
+delegation.cancelled
 ```
 
 ### SIGNAL
 
 ```text
-assistant.content.delta
-assistant.thinking.delta
-provider.activity
-provider.retrying
-tool.progress
-permission.waiting
-service.progress
+delegation.progress
+delegation.permission_waiting
 ```
 
-## Ordering
-
-Cada execution debe emitir `seq` monotónico o equivalente. Stable `event_id` + `execution_id` + sequence permiten:
-
-- UI replay;
-- idempotent persistence sink;
-- reconnect;
-- testing exact transitions;
-- background result delivery.
-
-## Required sinks
-
-El contract de Overmind ya contempla required sinks. Úsalos para persistence de hechos que no pueden perderse. Un sink falla => no fingir commit.
-
-No hacer durable cada stream delta: persistir el FACT final y, si observability lo requiere, telemetry separada.
+No es necesario traducir cada event interno de OpenCode a un event público Overmind.
 
 ## RunState
 
-RunState debe poseer:
+RunState genérico es útil si Overmind necesita executions cancellable/queryable más allá de una Tool call síncrona. Hasta entonces, mantener cancellation dentro del Tool/adaptor evita una nueva domain layer.
 
-- execution active por session;
-- cancellation token;
-- child/background job references;
-- state transitions;
-- wait/query primitives.
+## Cancellation boundary
 
-No debe poseer ContextCompiler ni ModelBackend.
-
-## Cancellation tree
-
-```text
-cancel parent execution
- -> cancel current model operation
- -> signal ToolExecutor
- -> cancel foreground child executions
- -> policy decides background child handling
-```
-
-Side effects ya committed no se reejecutan ni se “deshacen” automáticamente por cancellation; MutationJournal/Reconciliation define qué es reversible.
+Si se usa ACP, OpenCode ya expone `cancel`. Si se usa subprocess one-shot, el adapter controla process lifetime. Esto resuelve la primera integración sin copiar `session/run-state.ts`.

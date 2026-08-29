@@ -1,77 +1,65 @@
-# Phased Implementation Plan
+# Phased Plan — integración primero, abstracciones después
 
-## Phase A — Freeze invariants before infrastructure
+## Phase A — Preserve invariants
 
-1. Completar/reforzar refactor de ContextCompiler sin cambios semánticos.
-2. Serializers versionados para UserUnit/AssistantUnit/ProtocolUnit.
-3. Tests de round-trip canónico.
-4. Stable ID value types.
+1. Mantener ContextCompiler y ContextUnits sin cambios semánticos.
+2. Mantener Tool protocol fail-closed y ProtocolUnit atomicity.
+3. Mantener Plugin stage/validate/freeze.
+4. No introducir Session/Event/Permission frameworks para preparar la integración.
 
-**Exit:** canonical cognitive state puede serializarse/reconstruirse sin provider messages.
+**Exit:** baseline de Overmind permanece estable.
 
-## Phase B — EVENTS + Session shell
+## Phase B — OpenCode delegation spike
 
-1. Implementar local EventPort FACT/SIGNAL según contract existente.
-2. Session/Execution records in-memory primero.
-3. RunState con one-active-execution invariant.
-4. Emitir FACTs desde commit boundaries del Agent/Tool execution.
+1. First-party `OpenCodePlugin` conceptual.
+2. Una Tool de alto nivel `agent.code`/equivalente.
+3. Configuración fija/scoped de executable y workspace.
+4. Subprocess `opencode run --format json` como primer transport.
+5. Parsear output protocol sin volcarlo completo al Context.
+6. Devolver `DelegationResult` bounded con external session ID cuando sea posible.
+7. Timeout/cancellation conservador; no blind retry de mutaciones inciertas.
 
-**Exit:** una ejecución puede observarse completamente sin parsear logs/callbacks ad hoc.
+**Exit:** una misión de coding real puede completarse sin modificar Agent/Core.
 
-## Phase C — Persistence
+## Phase C — Harden capability boundary
 
-1. SessionRepository.
-2. required sink idempotente para durable FACTs.
-3. rehydrate Session canonical units.
-4. crash/restart tests.
+1. Dedicated OpenCode agent/profile con least privilege.
+2. Input/output size limits.
+3. Data-sharing policy explícita.
+4. error taxonomy del adapter.
+5. tests de process failure, malformed protocol y uncertain side effects.
+6. verify plugin removal leaves Core unchanged.
 
-**Exit:** restart -> resume conserva Context semantics y Tool protocol.
+**Exit:** la capability es segura, removible y testeable como Plugin independiente.
 
-## Phase D — ToolExecutor + PermissionService
+## Phase D — ACP, only if required
 
-1. ToolExecutionContext.
-2. CapabilityResolver.
-3. Permission rules/approver port.
-4. lifecycle events.
-5. integrate existing Workspace tools without weakening confinement.
+Migrar o añadir `OpenCodeAcpAdapter` si el uso demuestra necesidad de:
 
-**Exit:** every side-effecting action is identifiable, cancellable, policy-checked and observable.
+- persistent external sessions;
+- structured resume/fork;
+- permission forwarding;
+- interactive cancellation;
+- richer progress;
+- process reuse.
 
-## Phase E — MutationJournal
+Un proceso ACP long-lived puede ser el primer caso concreto para futura SERVICES lifecycle.
 
-1. wrap existing Workspace recovery.
-2. before/after fingerprints.
-3. rollback/reconciliation API.
-4. execution linkage.
+**Exit:** lifecycle rico sin filtrar wire protocol a Agent/Core.
 
-**Exit:** committed filesystem mutations have audit/recovery identity.
+## Phase E — Generic delegation, only with second consumer
 
-## Phase F — Foreground subagents
+Si aparece otro external agent o un subagent nativo Overmind con semántica común:
 
-1. child Session + explicit spec.
-2. depth=1.
-3. context seed/result boundary.
-4. independent model/tool budgets.
-5. cancellation propagation.
-6. resume child.
+1. comparar contratos reales;
+2. extraer `AgentDelegationPort` mínimo;
+3. mantener adapters privados por backend;
+4. no forzar lowest-common-denominator si las capacidades son distintas.
 
-**Exit:** child work never aliases parent context or capabilities implicitly.
+## Independent Overmind evolution
 
-## Phase G — SERVICES/background
+Memory, RAG, Blackboard, persistence, EVENTS, SERVICES, MCP, WebUI y native subagents siguen su roadmap propio. OpenCode sirve como referencia cuando estos subsistemas lleguen, pero no se convierten en fases obligatorias de esta integración.
 
-1. implement deferred Service lifecycle.
-2. BackgroundJob service.
-3. no-poll completion events.
-4. explicit wake/cognition policy.
+## No phase for coding-stack duplication
 
-## Phase H — MCP + Skills
-
-Implementar como Plugins sobre substrate, no como Core branches.
-
-## Phase I — Runtime API / WebUI / ACP
-
-Stabilize public API after operational semantics exist.
-
-## Phase J — Additional model backends/routing
-
-Solo según requirements reales. Mantener explicit targets.
+No existe fase para implementar en Overmind shell/edit/LSP/Git/coding prompts/code-mode. Ese dominio permanece detrás de OpenCode.

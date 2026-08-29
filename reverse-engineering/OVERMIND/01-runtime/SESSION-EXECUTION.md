@@ -1,77 +1,40 @@
-# Session and Execution Runtime
+# Session and Execution Runtime — referencia condicional
 
-**Status:** RECOMMENDED
+**Status:** ADAPT IF REQUIRED, not a prerequisite for OpenCode delegation
 
-## Problema actual
+## Distinción importante
 
-`Agent` posee `_units` y `_request_id` in-memory. Es correcto para el Core actual, pero no basta para:
+OpenCode demuestra el valor de una Session durable porque es un coding runtime stateful con múltiples interfaces. Esto **no obliga** a Overmind a construir primero un `SessionService` para poder invocar un coding agent.
 
-- restart/resume;
-- WebUI/remote clients;
-- child agents;
-- background jobs;
-- durable Memory ingestion;
-- multi-session CLI;
+Una Tool de delegación puede devolver un `external_session_id` OpenCode opaque y funcionar dentro del runtime actual.
+
+## Cuándo necesita Overmind una Session propia
+
+Introducir una Session domain de Overmind cuando aparezca una necesidad propia como:
+
+- restart/resume durable de la conversación Overmind;
+- WebUI + CLI simultáneos o multi-interface;
+- Memory que necesite conversation identity estable;
+- subagents nativos Overmind;
+- background executions propios;
 - cancel/query desde otro caller.
 
-## Lección OpenCode
+## Si se implementa
 
-OpenCode trata Session como dominio de identidad y persistence, no como variable local del CLI. Parent/child sessions, model/agent metadata, status, cost/tokens y revert forman parte del runtime.
-
-## Adaptación propuesta
-
-Separar tres identidades:
-
-### Session
-
-Conversación/lifetime durable.
+Mantener separadas al menos:
 
 ```text
-SessionRecord
-- id
-- parent_id?
-- created_at / updated_at
-- status
-- metadata
-- default agent/profile?
-- default target?
+OvermindSessionId
+OvermindExecutionId
+ExternalDelegationRef(provider="opencode", session_id="...")
 ```
 
-### Execution
+No hacer equivalentes la Session de Overmind y la Session OpenCode.
 
-Un request activo o completado dentro de Session.
+## Context invariant
 
-```text
-ExecutionRecord
-- id
-- session_id
-- cognitive_request_id
-- state
-- started/completed
-- target_id
-- input/output budget snapshot
-- outcome/error
-- usage/timing summary
-```
-
-### ModelTurn
-
-Puede registrarse como FACT/event/record dentro de execution sin convertirse en top-level domain si no hace falta.
-
-## State machine inicial
-
-```text
-created -> running -> completed
-                   -> failed
-                   -> cancelling -> cancelled
-```
-
-Un único foreground execution activo por Session es el default más seguro. Background child jobs son otra Session/Execution, no concurrencia arbitraria sobre el mismo Agent context.
-
-## Reconstruction
-
-SessionService rehidrata canonical ContextUnits y state necesario del compiler. Después entrega al Agent una conversación equivalente a la anterior. Agent no consulta SQL/JSON files directamente.
+Una Session propia persiste canonical User/Assistant/Protocol units y compiler state suficiente. Nunca usa provider messages como canonical memory.
 
 ## Parent/child
 
-`parent_id` debe ser first-class desde la primera versión del schema aunque subagents se implementen después. Evita migrar identidad cuando aparezca delegación.
+Añadir parent/child identity solo cuando existan child executions Overmind. No es necesario para representar los subagents internos de OpenCode; esos permanecen detrás del adapter.

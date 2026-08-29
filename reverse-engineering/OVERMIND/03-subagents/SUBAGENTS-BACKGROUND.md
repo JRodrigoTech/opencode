@@ -1,84 +1,78 @@
-# Subagents and Background Work
+# Subagents and Background Work — no confundir delegación con clonación
 
-**Status:** RECOMMENDED; Overmind subagents are currently deferred
+**Status:** CONDITIONAL REFERENCE
 
-## OpenCode pattern worth adopting
+## Corrección de enfoque
 
-OpenCode implementa un subagent como una child Session real detrás de `TaskTool`:
+OpenCode implementa subagents como child sessions detrás de `TaskTool`. Es un patrón sólido **dentro de OpenCode**, pero Overmind no necesita copiarlo para poder usar un agente de coding.
 
-- parent/child identity;
-- agent target explícito;
-- optional model override;
-- derived permissions;
-- depth limit;
-- resume por child session ID;
-- foreground/background execution;
-- cancellation linkage;
-- result reintroduced into parent.
-
-La identidad separada es la lección principal.
-
-## Overmind target
-
-No crear `Subagent` como llamada recursiva al mismo `Agent._units`.
+La decisión recomendada para software engineering es:
 
 ```text
-Parent Session/Execution
-      |
-      +-- spawn request
-              |
-              v
-         Child Session
-         Child Execution
-         Child Agent state
-         own ContextCompiler view
-         explicit ModelTarget
-         explicit Tool/Plugin grants
-         own budgets
-              |
-              v
-         SubagentResult
-              |
-              v
- Parent receives bounded ProtocolUnit/observation
+Overmind Agent
+   |
+   +-> OpenCode delegation Tool
+          |
+          v
+      OpenCode session
+          |
+          +-> build / plan / explore / general
+          +-> internal child sessions / TaskTool
+          +-> background work if OpenCode chooses
+          |
+          v
+      bounded result
 ```
 
-## Contract mínimo
+Overmind trata toda esa jerarquía como una capability externa. No necesita reflejar cada child session de OpenCode en su propio Agent graph.
+
+## Cuándo sí tendría sentido un subagent nativo Overmind
+
+Solo cuando exista una necesidad cognitiva general que pertenezca a Overmind, por ejemplo:
+
+- separar una investigación de Memory/RAG del parent context;
+- ejecutar razonamientos con distinto target/model budget;
+- delegar una tarea no cubierta por un agente especializado externo;
+- correr varias ramas cognitivas propias con ownership explícito.
+
+En ese caso siguen siendo útiles las lecciones de OpenCode:
+
+- identidad separada;
+- context isolation;
+- explicit grants;
+- bounded result;
+- depth limits;
+- cancellation;
+- resume si aporta valor.
+
+Pero son **lecciones de diseño**, no un roadmap obligatorio.
+
+## Abstracción común: solo después
+
+Si en el futuro conviven:
+
+1. OpenCode external agent;
+2. uno o más subagents nativos Overmind;
+3. quizá otros agent backends;
+
+entonces puede emerger:
 
 ```text
-SubagentSpec
-- profile/role
-- task
-- target_id
-- tool grants
-- context seed policy
-- max model turns
-- token/cost/time budget
-- depth limit
+AgentDelegationPort
+- delegate
+- resume
+- cancel
+- status
 ```
 
-`SubagentResult` debe contener bounded content + structured status/usage/artifact references, no copiar toda child history al parent context.
-
-## Context isolation
-
-El child puede recibir un **explicit context seed** producido por Core, no referencia mutable a parent `_units`. El parent decide qué resultado incorporar mediante su protocolo/context rules.
-
-## Resume
-
-Después del MVP, `child_session_id` permite continuar la misma child. Resume debe rehidratar canonical units y compiler state como cualquier Session.
+No diseñarlo antes de tener esos consumidores.
 
 ## Background
 
-Implementar solo después de:
+No implementar `BackgroundJob` porque OpenCode lo tenga. OpenCode puede ejecutar su trabajo interno independientemente.
 
-- EventPort;
-- Persistence;
-- RunState;
-- cancellation;
-- child sessions.
-
-Background job no es una Tool “que tarda”; es una execution con lifecycle independiente. El parent recibe un FACT cuando termina y una policy decide si/whether wake cognition.
+Overmind necesita background propio solo si una capability de Overmind debe seguir activa más allá de un model turn — watchers, Memory consolidation, MCP connections, scheduler, etc. Entonces debe seguir el contract EVENTS/SERVICES ya definido por Overmind.
 
 ## Cognitive economy
 
-Alineado con el propio diseño de Overmind: polling de un background child no debe despertar el modelo. El runtime espera/detecta determinísticamente y solo produce cognition cuando el contract lo exige.
+Nunca usar el LLM parent para hacer polling del external agent. Si el transporte es síncrono, esperar determinísticamente. Si se vuelve background, un service/event debe detectar completion y despertar cognition solo cuando la policy lo requiera.
