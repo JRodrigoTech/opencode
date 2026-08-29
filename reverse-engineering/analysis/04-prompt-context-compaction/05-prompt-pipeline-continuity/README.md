@@ -1,257 +1,155 @@
 # Prompt pipeline, metadata y continuidad entre turns
 
-## Construcción vigente del request
+## Corrección de auditoría
 
-Archivo principal: `packages/core/src/session/runner/llm.ts`.
+No existe un único pipeline de prompt en `dev`. Este documento debe separar:
 
-El runner ya no contiene un `SessionPrompt` monolítico. Su propia cabecera deja explícita la intención de mantenerlo como orquestación sobre colaboradores pequeños.
+- **pipeline de producto**: `packages/opencode/src/session/prompt.ts` (`SessionPrompt`);
+- **pipeline V2/Core**: `packages/core/src/session/runner/llm.ts` (`SessionRunner`).
 
-### Secuencia de un provider turn
+La versión anterior presentaba el segundo como si hubiese reemplazado al primero. El composition root de `packages/opencode` demuestra que `SessionPrompt` sigue siendo un servicio real y cableado.
 
-**CONFIRMADO EN `dev`:** de forma simplificada, cada attempt realiza:
+---
 
-1. cargar la sesión y validar su location/workspace;
-2. seleccionar el agente;
-3. cargar/combinar system context, skill guidance y reference guidance;
-4. inicializar o preparar `SessionContextEpoch`;
-5. resolver el modelo;
-6. cargar `SessionHistory.entriesForRunner()` usando `baselineSeq`;
-7. materializar las tools permitidas para el agente;
-8. construir `LLM.request()`;
-9. intentar auto-compaction;
-10. capturar snapshot del filesystem;
-11. ejecutar `llm.stream(request)`;
-12. persistir texto, reasoning, provider metadata, tool calls/results y usage durante el stream;
-13. continuar si hay tools, steering u otra transición explícita.
+## 1. Pipeline de producto: `SessionPrompt`
 
-## `request.system`
+### Admisión y persistencia del user turn
 
-**CONFIRMADO EN `dev`:** se construye exactamente a partir de:
+`prompt(input)`:
 
-```text
-[agent.info?.system, system.baseline]
-```
+1. carga la Session;
+2. limpia revert si procede;
+3. crea y persiste el user message mediante `createUserMessage()`;
+4. actualiza/toca la Session;
+5. materializa overrides de tools como reglas de permiso cuando existen;
+6. si `noReply` es false entra en `loop({ sessionID })`.
 
-filtrando valores vacíos y convirtiéndolos a `SystemPart`.
+`createUserMessage()` resuelve:
 
-Esto confirma que:
+- agente explícito o default;
+- modelo explícito, modelo del agente o modelo actual de la Session;
+- variant válida;
+- parts text/file/agent/subtask;
+- attachments y recursos MCP;
+- hooks de plugin;
+- agent/model durables de la Session.
 
-- el system prompt del agente es independiente del contexto ambiental;
-- el baseline contextual tiene también role system;
-- los updates posteriores al baseline no tienen que volver a concatenarse aquí porque viven cronológicamente en el historial.
+### Loop de ejecución
 
-## `request.messages`
+`runLoop()` recarga historia mediante `MessageV2.filterCompactedEffect()` en cada iteración y decide si:
 
-Se forma con:
+- el assistant anterior ya terminó;
+- hay una subtask pendiente;
+- debe ejecutar otro provider turn;
+- debe compactar;
+- debe continuar tras tools.
 
-```text
-toLLMMessages(context, model)
-```
-
-y, si se alcanza el máximo de steps del agente, se añade un mensaje assistant `MAX_STEPS_PROMPT` y se deshabilitan tools (`toolChoice: "none"`).
-
-## Proyección de cada tipo de mensaje
-
-Archivo: `packages/core/src/session/runner/to-llm-message.ts`.
-
-### User
-
-Se conserva:
-
-- `id`;
-- texto;
-- attachments como partes `media` con `mediaType`, URI/data, filename y descripción opcional;
-- `message.metadata`;
-- lista `agents` si existe.
-
-### Synthetic
-
-Se proyecta como role `user` con su metadata.
-
-### System
-
-Se proyecta con `Message.system(message.text)`.
-
-### Shell
-
-Se proyecta como role `user`:
+En cada provider turn obtiene:
 
 ```text
-Shell command: <command>
-
-<output>
+skills       = SystemPrompt.skills(agent)
+environment  = SystemPrompt.environment(model)
+instructions = Instruction.system()
+mcp          = SystemPrompt.mcp(agent, session.permission)
+messages     = MessageV2.toModelMessagesEffect(history, model)
 ```
 
-manteniendo metadata.
+Luego construye `system[]`, añade structured-output guidance cuando corresponde y llama a `SessionProcessor.process(...)` con modelo, tools, permisos, system e historial proyectado.
 
-### Assistant
+### Autoridad y continuidad en este path
 
-La proyección distingue modelo/proveedor actual frente al que originó el mensaje.
+La continuidad se basa en:
 
-**CONFIRMADO EN `dev`:** si provider e ID de modelo coinciden y el mensaje no contiene error, puede reutilizarse provider metadata de:
+- filas durable/proyectadas de Session, Message y Part;
+- `MessageV2.filterCompactedEffect()`;
+- compaction legacy-compatible;
+- re-resolución de agente/modelo/tools por iteración;
+- reconstrucción de `system[]` desde entorno/instrucciones/skills/MCP;
+- provider metadata y transforms preservados por las capas `MessageV2`/`LLM` cuando son aplicables.
 
-- reasoning;
-- tool calls;
-- tool results.
+No existe en este path una dependencia obligatoria de `SessionContextEpoch` para recordar qué system sources conoce el modelo.
 
-Si el modelo cambió:
+### Cambio de agente/modelo
 
-- reasoning textual se degrada a `text` para preservar contenido semántico;
-- metadata provider-specific que podría no ser portable deja de reutilizarse.
+`createUserMessage()` actualiza `Session.agent`/`Session.model` si cambian. El siguiente loop utiliza esa nueva selección para tools, system y modelo. La continuidad es por estado durable de la Session y el transcript, no por conservar una request completa.
 
-Esta es una pieza clave de continuidad cross-model.
+### Headers y metadata de transporte
 
-### Tool calls y results
+El path de producto delega la preparación final a `packages/opencode/src/session/llm.ts` y `session/llm/request.ts`, donde se añaden opciones/headers/provider transforms según modelo, integración y runtime elegido. No debe copiarse automáticamente la lista exacta de headers del runner V2 a este path.
 
-Se preservan:
+---
 
-- call ID;
-- tool name;
-- input parseado cuando es posible;
-- si la tool fue ejecutada por el proveedor;
-- provider metadata cuando es reutilizable.
+## 2. Pipeline V2/Core: `SessionRunner`
 
-Para tools provider-executed, call y result pueden permanecer dentro del assistant message. Para tools locales, los results se proyectan como mensajes tool separados.
+Archivo: `packages/core/src/session/runner/llm.ts`.
 
-### Compaction
+Para cada attempt V2:
 
-Se proyecta como role `user` dentro de `<conversation-checkpoint>` y transporta `message.metadata`.
+1. carga Session/location;
+2. selecciona agente;
+3. combina `SystemContext`, skill guidance y reference guidance;
+4. inicializa/prepara `SessionContextEpoch`;
+5. resuelve modelo;
+6. carga `SessionHistory.entriesForRunner()` desde `baselineSeq`;
+7. materializa tools;
+8. construye `LLM.request()`;
+9. puede compactar antes del provider call;
+10. ejecuta `llm.stream(request)`;
+11. persiste eventos assistant/tool/usage;
+12. decide continuación, steering o compaction.
 
-### Agent/model switched
+### `request.system` V2
 
-**CONFIRMADO EN `dev`:** `agent-switched` y `model-switched` devuelven `[]`; son eventos de control de sesión, no contenido que deba ver el modelo directamente.
-
-## Metadata de transporte / provider
-
-Además del contenido del prompt, `LLM.request()` recibe metadata técnica no textual.
-
-### HTTP headers
-
-**CONFIRMADO EN `dev`:** el runner añade:
-
-- `x-session-affinity: <session.id>`;
-- `X-Session-Id: <session.id>`;
-- `x-parent-session-id: <parentID>` cuando la sesión tiene padre.
-
-Estos headers pertenecen al envelope de transporte y no son mensajes visibles para el modelo.
-
-### Prompt cache key
-
-El runner deriva un `promptCacheKey` de la sesión y lo pasa en:
+Se forma a partir de:
 
 ```text
-providerOptions.openai.promptCacheKey
+agent.info?.system
+system.baseline
 ```
 
-Si el ID cumple el formato `ses_<64 hex>`, usa sólo el hash; de lo contrario usa el ID completo.
+Los updates posteriores al baseline viajan en la historia V2.
 
-**CONFIRMADO EN `dev`:** existe por tanto una afinidad/cache identity por sesión para el provider OpenAI-compatible, separada del contenido semántico del prompt.
+### `request.messages` V2
 
-## Metadata de mensajes
+`toLLMMessages(context, model)` proyecta user, synthetic, system, shell, assistant, tools y compaction. Cuando se alcanza el step limit añade `MAX_STEPS_PROMPT` como assistant y deshabilita tools.
 
-`to-llm-message.ts` conserva `message.metadata` en user, synthetic, shell, assistant y compaction. También conserva metadata provider-specific en reasoning/tool parts únicamente cuando considera seguro reutilizarla con el mismo modelo.
+### Metadata V2
 
-**INFERENCIA, confianza alta:** esta división evita dos extremos problemáticos:
+El runner añade explícitamente:
 
-- perder continuidad técnica cuando el mismo proveedor puede reaprovechar opaque/provider state;
-- enviar metadata de continuation incompatible cuando el modelo/proveedor cambió.
+- `x-session-affinity`;
+- `X-Session-Id`;
+- `x-parent-session-id` cuando existe padre;
+- `providerOptions.openai.promptCacheKey` derivado de la Session.
 
-## Historia que realmente llega al modelo
+Estas propiedades son confirmadas del **request V2**.
 
-`packages/core/src/session/history.ts` calcula la ventana durable del runner a partir de dos fronteras:
+### Continuidad cross-model V2
 
-- `baselineSeq` del `SessionContextEpoch`;
-- secuencia de la compaction más reciente.
+`to-llm-message.ts` puede reutilizar metadata opaque de reasoning/tool calls/results cuando provider/model coinciden y degradar contenido a formas portables cuando cambian. Los eventos `agent-switched`/`model-switched` son control durable y no se convierten necesariamente en texto visible al modelo.
 
-### Sin compaction
+### Compaction V2
 
-Los system messages hasta `baselineSeq` se omiten porque ya están absorbidos en `system.baseline`. Se mantienen mensajes no-system y system updates posteriores.
+La compaction se proyecta como contexto histórico y sustituye la porción reducida de historia; el baseline de `SessionContextEpoch` evita reenviar system context ya absorbido.
 
-### Con compaction
+---
 
-Se cargan:
+## 3. Comparación
 
-- la compaction y todo lo posterior;
-- además, system updates posteriores al `baselineSeq` cuando sea necesario.
+| Aspecto | `SessionPrompt` | `SessionRunner` V2 |
+|---|---|---|
+| System context | `SystemPrompt` + `Instruction` + MCP + skills | `agent.system` + `SystemContext`/epoch |
+| Historia | `MessageV2.filterCompactedEffect` + SessionV1-compatible parts | `SessionHistory.entriesForRunner` + SessionMessage V2 |
+| Compaction | `packages/opencode/src/session/compaction.ts` | `packages/core/src/session/compaction.ts` |
+| LLM execution | `packages/opencode/src/session/llm.ts` | `LLMClient` / `@opencode-ai/llm` |
+| Tool state | SessionProcessor + Parts | durable Session events + registry settlement |
+| Context source snapshot | no `SessionContextEpoch` obligatorio | sí |
+| Estado en `dev` | cableado por producto | implementación V2 coexistente |
 
-**CONFIRMADO EN `dev`:** no se reenvía todo el historial antiguo. El checkpoint sustituye la porción compactada y el baseline sustituye el contexto system ya absorbido.
+## 4. Evolución histórica
 
-## Continuidad entre turns
-
-La continuidad no depende de una sola técnica. Resulta de la combinación de:
-
-1. persistencia de mensajes de sesión;
-2. context epoch con baseline/snapshot;
-3. deltas `system` para cambios de fuentes;
-4. compaction checkpoint + recent tail;
-5. provider metadata reutilizable cuando el modelo no cambia;
-6. IDs estables de tools/messages;
-7. re-resolución del modelo y rematerialización de tools en cada attempt.
-
-## Cambio de agente
-
-**CONFIRMADO EN `dev`:** cada nuevo turn vuelve a ejecutar `agents.select(session.agent)` y vuelve a cargar `skillGuidance.load(agent)`. Por ello un cambio durable de agente puede modificar:
-
-- `agent.info.system`;
-- permissions/tools materializadas;
-- skill guidance;
-- step limit.
-
-El evento `agent-switched` no se añade como texto al modelo; sus efectos se observan mediante la nueva configuración del siguiente request.
-
-## Cambio de modelo
-
-Análogamente, `model-switched` no se convierte en mensaje textual. El runner resuelve el nuevo modelo y `toLLMMessages()` adapta el historial:
-
-- mantiene texto;
-- conserva reasoning como reasoning sólo si el modelo coincide;
-- elimina metadata provider-specific no portable si cambia.
-
-Esto reconstruye una continuidad semántica aunque cambie la representación protocolar.
-
-## Steering y queued prompts
-
-`SessionInput` permite promociones `steer` y `queue` antes de construir el request. Si se promueve input, el step counter puede reiniciarse.
-
-La branch `queue-steer-prompts` es adyacente a este flujo: trata admission/UI de follow-ups. **No es una rama sobre system-prompt construction**, aunque influye en qué input queda durablemente disponible para un provider turn futuro.
-
-## Evolución desde `SessionPrompt`
-
-### `refactor/session-prompt-parts`
-
-Commit representativo `1c8f84c4be6d4d0278c41bd725ea8411d32f1002` — `refactor(session): extract prompt parts`, seguido por simplificaciones de nombres.
-
-**CONFIRMADO EN BRANCH:** marca el inicio de una descomposición del antiguo `SessionPrompt` en piezas con responsabilidades más pequeñas.
-
-### `session-prompt-history`
-
-**CONFIRMADO COMO LÍNEA EVOLUTIVA:** extrae/separa responsabilidades relacionadas con la selección/proyección de historia del prompt loop. En `dev` esa frontera es visible como `SessionHistory` + `toLLMMessages`.
-
-### `feat/workspace-prompt-files`
-
-**CONFIRMADO COMO LÍNEA HISTÓRICA:** introducía archivos de prompt/contexto a nivel workspace. La idea durable que llega a la arquitectura moderna no es necesariamente la API concreta de esa branch, sino que el workspace sea una fuente explícita de contexto y no un detalle global implícito.
-
-### `layer-node-sprompt`
-
-Pertenece a la línea de refactor Effect/layers del viejo SessionPrompt. Es relevante como evidencia de desacoplamiento, pero el análisis arquitectónico de esos layers corresponde principalmente al agente dedicado a Effect/refactors. Aquí sólo se usa para marcar la migración desde un monolito hacia services colaboradores.
-
-## Invariante de autoridad
-
-**INFERENCIA, confianza alta:** el pipeline actual impone tres dominios de autoridad distintos:
-
-```text
-SYSTEM AUTHORITY
-  agent system + system-context baseline + system deltas
-
-CONVERSATIONAL MEMORY
-  user/assistant/tools/shell/synthetic
-
-COMPRESSED HISTORY
-  conversation-checkpoint como user
-```
-
-La frontera evita que un resumen o un output de tool pueda ascender accidentalmente al mismo nivel de autoridad que las instrucciones privilegiadas.
+Branches como `refactor/session-prompt-parts`, `session-prompt-history`, `system-context`, `context-checkpoint` y las familias Core V2 muestran una descomposición progresiva del monolito. Esa evolución explica el runner V2, pero no autoriza a borrar documentalmente el path legacy-compatible mientras siga compuesto y ejecutable.
 
 ## Conclusión
 
-El prompt final es mejor entendido como una **vista materializada de estado durable**. El runner reconstruye esa vista antes de cada provider turn usando fuentes, snapshots, historia proyectada, modelo y tool registry. La continuidad entre turns surge de persistir los componentes semánticos necesarios y volver a ensamblarlos, no de conservar una cadena de prompt completa de un turno al siguiente.
+La continuidad de OpenCode debe describirse como una migración con dos mecanismos reales. Ambos reconstruyen el request desde estado persistido, pero difieren en cómo representan contexto privilegiado, historia, compaction y metadata. La documentación debe nombrar siempre el pipeline al que atribuye una propiedad.
